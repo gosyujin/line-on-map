@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Line on Map - 東京の路線図</title>
+    <meta name="description" content="東京近郊の電車・地下鉄・バスを、実際に通っているルートで地図上に表示します。路線をクリックすると強調表示されます。" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff8a00'/%3E%3Cpath d='M6 22 L13 12 L19 18 L26 9' stroke='white' stroke-width='3.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="map"></div>
+
+    <aside id="controls" aria-label="表示切り替え">
+      <h1>Line on Map</h1>
+      <label><input type="checkbox" data-cat="train" checked /><i class="dot" style="--c:#00a040"></i>電車</label>
+      <label><input type="checkbox" data-cat="subway" checked /><i class="dot" style="--c:#0072bc"></i>地下鉄</label>
+      <label><input type="checkbox" data-cat="bus" checked /><i class="dot" style="--c:#d9531e"></i>バス<small>(都営)</small></label>
+      <div class="buttons">
+        <button type="button" id="btn-tokyo">東京</button>
+        <button type="button" id="btn-japan">日本全体</button>
+      </div>
+    </aside>
+
+    <section id="panel" hidden aria-live="polite">
+      <button type="button" id="panel-close" aria-label="選択を解除">×</button>
+      <div class="badge" id="panel-badge"></div>
+      <h2 id="panel-title"></h2>
+      <p id="panel-sub"></p>
+      <p id="panel-detail"></p>
+      <div id="panel-others" hidden>
+        <span>この地点を通る他の路線</span>
+        <div id="panel-others-list"></div>
+      </div>
+    </section>
+
+    <div id="status" role="status">路線データを読み込み中…</div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
