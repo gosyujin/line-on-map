@@ -37,6 +37,16 @@ const map = new maplibregl.Map({
   },
 });
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), 'top-right');
+map.addControl(
+  new maplibregl.GeolocateControl({
+    positionOptions: { enableHighAccuracy: true },
+    trackUserLocation: true,
+    showUserLocation: true,
+    showAccuracyCircle: true,
+    fitBoundsOptions: { maxZoom: 15 },
+  }),
+  'top-right',
+);
 map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
 
 const el = {
@@ -122,14 +132,53 @@ function addHighlightLayers() {
   }
 }
 
+// 駅・停留所の丸印。バスは数が多いのでズームしたときだけ表示する。
+function addStopLayers() {
+  for (const { key } of CATEGORIES) {
+    const minzoom = key === 'bus' ? 14 : 11.5;
+    const r = key === 'bus' ? [14, 2.5, 17, 5] : [11.5, 2.5, 16, 6.5];
+    map.addLayer({
+      id: `${key}-stop`,
+      type: 'circle',
+      source: `${key}-stops`,
+      minzoom,
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], ...r],
+        'circle-color': '#fff',
+        'circle-stroke-color': ['get', 'colour'],
+        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], minzoom, 1.2, 16, 2.5],
+      },
+    });
+  }
+  // 選択中の路線の駅は、引いた縮尺でも見えるように大きめに出す
+  for (const { key } of CATEGORIES) {
+    map.addLayer({
+      id: `${key}-stop-sel`,
+      type: 'circle',
+      source: `${key}-stops`,
+      filter: ['==', ['get', 'gid'], -1],
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 3, 12, 5, 16, 8],
+        'circle-color': '#fff',
+        'circle-stroke-color': '#222',
+        'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 9, 1.5, 16, 3],
+      },
+    });
+  }
+}
+
 function setSelection(sel) {
   selected = sel;
   for (const { key } of CATEGORIES) {
     const filter = sel && sel.cat === key ? ['==', ['get', 'gid'], sel.gid] : ['==', ['get', 'gid'], -1];
-    for (const suffix of ['glow', 'sel-casing', 'sel-line']) map.setFilter(`${key}-${suffix}`, filter);
+    for (const suffix of ['glow', 'sel-casing', 'sel-line', 'stop-sel']) map.setFilter(`${key}-${suffix}`, filter);
   }
   // 選択中は他の路線を薄くして、強調を目立たせる
   for (const id of baseLayerIds) map.setPaintProperty(id, 'line-opacity', sel ? 0.35 : 1);
+  for (const { key } of CATEGORIES) {
+    map.setPaintProperty(`${key}-stop`, 'circle-opacity', sel ? 0.4 : 1);
+    map.setPaintProperty(`${key}-stop`, 'circle-stroke-opacity', sel ? 0.4 : 1);
+  }
 }
 
 function findFeature(cat, gid) {
@@ -144,7 +193,7 @@ function showPanel(sel, others = []) {
   el.panel.style.borderLeftColor = HIGHLIGHT;
   el.badge.textContent = LABELS[p.cat];
   el.badge.style.setProperty('--c', p.colour);
-  el.title.textContent = p.cat === 'bus' && p.ref ? `${p.ref}` : p.name;
+  el.title.textContent = p.name;
   el.sub.textContent = [p.operator, p.nameEn].filter(Boolean).join(' / ');
   el.detail.textContent = p.detail || '';
   el.detail.hidden = !p.detail;
@@ -155,7 +204,7 @@ function showPanel(sel, others = []) {
     if (!of) continue;
     const b = document.createElement('button');
     b.type = 'button';
-    b.textContent = of.properties.cat === 'bus' ? `${of.properties.ref} (バス)` : of.properties.name;
+    b.textContent = of.properties.name;
     b.style.setProperty('--c', of.properties.colour);
     b.addEventListener('click', () => {
       select(o, [sel, ...others.filter((x) => x !== o)]);
@@ -186,7 +235,55 @@ function visibleHitLayers() {
   return hitLayerIds.filter((id) => map.getLayoutProperty(id, 'visibility') !== 'none');
 }
 
+let popup = null;
+
+function showStopPopup(lngLat, name, lines) {
+  popup?.remove();
+  const box = document.createElement('div');
+  const title = document.createElement('strong');
+  title.textContent = name;
+  box.append(title);
+  if (lines.length) {
+    const sub = document.createElement('div');
+    sub.className = 'popup-lines';
+    sub.textContent = lines.join(' / ');
+    box.append(sub);
+  }
+  popup = new maplibregl.Popup({ offset: 12, closeButton: false, maxWidth: '260px' }).setLngLat(lngLat).setDOMContent(box).addTo(map);
+}
+
 map.on('click', (e) => {
+  popup?.remove();
+  // 駅の丸印を優先して判定する
+  const sr = 10;
+  const stopLayers = CATEGORIES.flatMap(({ key }) => [`${key}-stop-sel`, `${key}-stop`]).filter(
+    (id) => map.getLayoutProperty(id, 'visibility') !== 'none',
+  );
+  const stopHits = map.queryRenderedFeatures(
+    [
+      [e.point.x - sr, e.point.y - sr],
+      [e.point.x + sr, e.point.y + sr],
+    ],
+    { layers: stopLayers },
+  );
+  if (stopHits.length) {
+    const stop = stopHits[0];
+    const sameStation = stopHits.filter((h) => h.properties.name === stop.properties.name);
+    const sels = [];
+    for (const h of sameStation) {
+      if (!sels.some((x) => x.cat === h.properties.cat && x.gid === h.properties.gid))
+        sels.push({ cat: h.properties.cat, gid: h.properties.gid });
+    }
+    const names = sels.map((x) => findFeature(x.cat, x.gid)?.properties.name).filter(Boolean);
+    showStopPopup(stop.geometry.coordinates, stop.properties.name, names);
+    // 選択中の路線の駅なら選択は維持し、そうでなければその駅を通る路線を選択する
+    if (!selected || !sels.some((x) => x.cat === selected.cat && x.gid === selected.gid)) {
+      const [first, ...others] = sels;
+      select(first, others);
+    }
+    return;
+  }
+
   const r = 8; // タッチでも当てやすいように余裕を持たせる
   const box = [
     [e.point.x - r, e.point.y - r],
@@ -217,7 +314,7 @@ map.on('mousemove', (e) => {
     [e.point.x - 4, e.point.y - 4],
     [e.point.x + 4, e.point.y + 4],
   ];
-  const over = map.queryRenderedFeatures(box, { layers: visibleHitLayers() }).length > 0;
+  const over = map.queryRenderedFeatures(box, { layers: [...visibleHitLayers(), ...hitLayerIds.map((id) => id.replace('-hit', '-stop'))] }).length > 0;
   map.getCanvas().style.cursor = over ? 'pointer' : '';
 });
 
@@ -231,7 +328,7 @@ document.querySelectorAll('#controls input[data-cat]').forEach((input) => {
   input.addEventListener('change', () => {
     const key = input.dataset.cat;
     const vis = input.checked ? 'visible' : 'none';
-    for (const suffix of ['casing', 'line', 'hit', 'glow', 'sel-casing', 'sel-line']) {
+    for (const suffix of ['casing', 'line', 'hit', 'glow', 'sel-casing', 'sel-line', 'stop', 'stop-sel']) {
       map.setLayoutProperty(`${key}-${suffix}`, 'visibility', vis);
     }
     if (!input.checked && selected?.cat === key) clearSelection();
@@ -242,21 +339,31 @@ map.on('load', async () => {
   const base = import.meta.env.BASE_URL;
   const results = await Promise.all(
     CATEGORIES.map(async ({ key }) => {
-      const res = await fetch(`${base}data/${key}.geojson`);
-      if (!res.ok) throw new Error(`${key}: HTTP ${res.status}`);
-      return [key, await res.json()];
+      const [lines, stops] = await Promise.all(
+        [key, `${key}-stops`].map(async (name) => {
+          const res = await fetch(`${base}data/${name}.geojson`);
+          if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
+          return res.json();
+        }),
+      );
+      return [key, lines, stops];
     }),
   ).catch((err) => {
     el.status.textContent = `路線データの読み込みに失敗しました (${err.message})`;
     throw err;
   });
 
-  for (const [key, data] of results) {
+  for (const [key, data, stops] of results) {
     featuresByCat[key] = data.features;
+    // 駅の丸印は路線の色で縁取る
+    const colours = new Map(data.features.map((f) => [f.properties.gid, f.properties.colour]));
+    for (const f of stops.features) f.properties.colour = colours.get(f.properties.gid) ?? '#666';
     map.addSource(key, { type: 'geojson', data });
+    map.addSource(`${key}-stops`, { type: 'geojson', data: stops });
   }
   for (const cat of CATEGORIES) addCategoryLayers(cat);
   addHighlightLayers();
+  addStopLayers();
 
   const total = Object.values(featuresByCat).reduce((n, fs) => n + fs.length, 0);
   el.status.textContent = `${total} 路線を表示中`;

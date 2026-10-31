@@ -17,10 +17,10 @@ const OUT_DIR = join(ROOT, 'public', 'data');
 const FORCE = process.argv.includes('--force');
 
 const UA = 'line-on-map/0.1 (https://github.com/gosyujin/line-on-map)';
-const ENDPOINTS = [
+const ENDPOINTS = (process.env.OVERPASS_URL ? [process.env.OVERPASS_URL] : []).concat([
   'https://overpass-api.de/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-];
+  'https://overpass.openstreetmap.fr/api/interpreter',
+]);
 
 // 取得対象範囲 (south, west, north, east)
 const BBOX = [35.45, 139.35, 35.85, 139.95];
@@ -61,6 +61,7 @@ async function overpass(query) {
         method: 'POST',
         headers: { 'User-Agent': UA, 'Content-Type': 'application/x-www-form-urlencoded' },
         body,
+        signal: AbortSignal.timeout(150_000),
       });
       if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
       const text = await res.text();
@@ -89,6 +90,24 @@ async function loadCategory(key, cat) {
   return data;
 }
 
+// 路線リレーションのメンバーノード(駅・停留所)の名前と座標を取得する
+async function loadNodes(key, cat) {
+  const cacheFile = join(CACHE_DIR, `${key}-nodes.json`);
+  if (!FORCE && existsSync(cacheFile)) {
+    console.log(`[${key}] using nodes cache`);
+    return JSON.parse(await readFile(cacheFile, 'utf8'));
+  }
+  console.log(`[${key}] fetching stops from Overpass...`);
+  const data = await overpass(`${cat.query}(${BBOX.join(',')})->.r;node(r.r);out;`);
+  const nodes = {};
+  for (const e of data.elements) {
+    const name = e.tags?.['name:ja'] || e.tags?.name;
+    if (e.type === 'node' && name) nodes[e.id] = { name, lat: e.lat, lon: e.lon };
+  }
+  await writeFile(cacheFile, JSON.stringify(nodes));
+  return nodes;
+}
+
 // ---- 路線名の正規化 -------------------------------------------------------
 // OSM の路線リレーションは「各駅停車/快速/特急/直通運転」など列車種別・方向ごとに
 // 作られているため、名前から種別・方向を取り除いて路線単位にまとめる。
@@ -98,10 +117,20 @@ const SERVICE_WORDS = /^(各駅停車|各停|普通|快速|急行|準急|特急|
 const EXCLUDE =
   /直通|運転|地下鉄-|\s-\s|成田エクスプレス|スカイライナー|シテイライナー|TJライナー|拝島ライナー|アクセス|列車|S-Train|ウエスタンリバー|^(あさま|あずさ|かがやき|こだま|のぞみ|たにがわ|とき|ひたち|ちちぶ|小江戸|踊り子|はこね|スーパーはこね|さがみ|えのしま|ふじさん|しおさい|さざなみ|多摩快速急行|各駅停車|小田急通勤急行)/;
 const LINE_SUFFIX = /(線|ライン|ゆりかもめ|モノレール|ライナー|電鉄|鉄道)$/;
-// 事業者名プレフィックス(キー用。表示名には残す)
-const COMPANY_PREFIX =
-  /^(JR|東日本旅客鉄道|京王電鉄|京王|京成電鉄|京成|小田急電鉄|小田急|東武鉄道|東武|西武鉄道|西武|東急電鉄|東急|京浜急行電鉄|京急|相模鉄道|相鉄|東京メトロ|東京地下鉄|都営|横浜市営地下鉄|東京モノレール)/;
-const KEY_ALIAS = { 常磐線快速: '常磐快速線', 'JR常磐線快速': '常磐快速線', 中央線JC: '中央線' };
+// 事業者名の正式名 → 短縮形。「本線」のように事業者名を外すと衝突する名前があるため、
+// 事業者名は外さず短縮形に揃えて同一路線をまとめる(例: 京王電鉄京王線 → 京王線)。
+const COMPANY_SHORT = {
+  京王電鉄: '京王',
+  京成電鉄: '京成',
+  小田急電鉄: '小田急',
+  東武鉄道: '東武',
+  西武鉄道: '西武',
+  東急電鉄: '東急',
+  京浜急行電鉄: '京急',
+  相模鉄道: '相鉄',
+  東京地下鉄: '東京メトロ',
+};
+const KEY_ALIAS = { JR常磐線快速: 'JR常磐快速線', JR中央線JC: 'JR中央線' };
 
 // "JR京浜東北線・根岸線 各駅停車 (南浦和 → 大船)" → "JR京浜東北線・根岸線"
 // "東京メトロ有楽町線 : 和光市→新木場"            → "東京メトロ有楽町線"
@@ -128,9 +157,15 @@ function lineName(raw) {
   return name;
 }
 
-function lineKey(name) {
-  const k = name.replace(COMPANY_PREFIX, '');
-  return KEY_ALIAS[name] ?? KEY_ALIAS[k] ?? k;
+// 事業者名の表記ゆれをそろえる。JR は事業者タグから「JR」を補う。
+function canonicalName(name, tags) {
+  const m = name.match(new RegExp(`^(${Object.keys(COMPANY_SHORT).join('|')})(.*)$`));
+  if (m) {
+    const short = COMPANY_SHORT[m[1]];
+    name = m[2].startsWith(short) ? m[2] : short + m[2];
+  }
+  if (isJR(tags.operator || '') && !/^JR/.test(name)) name = `JR${name}`;
+  return KEY_ALIAS[name] ?? name;
 }
 
 function isJR(operator) {
@@ -191,6 +226,29 @@ function collectWays(rel, g) {
   }
 }
 
+function collectStops(rel, g, nodes) {
+  for (const m of rel.members ?? []) {
+    if (m.type !== 'node' || !/^(stop|platform|station)/.test(m.role)) continue;
+    const n = nodes[m.ref];
+    if (n && inClip(n.lon, n.lat)) g.stops.push(n);
+  }
+}
+
+// 上り/下りやホームごとに別ノードになっているので、同名で近いものを1つの駅にまとめる
+function mergeStops(stops) {
+  const out = [];
+  for (const s of stops) {
+    const name = s.name.normalize('NFKC').replace(/\s*[(（].*$/, '').trim();
+    const hit = out.find((o) => o.name === name && Math.hypot(o.lon - s.lon, o.lat - s.lat) < 0.004);
+    if (hit) {
+      hit.lon = (hit.lon * hit.n + s.lon) / (hit.n + 1);
+      hit.lat = (hit.lat * hit.n + s.lat) / (hit.n + 1);
+      hit.n++;
+    } else out.push({ name, lon: s.lon, lat: s.lat, n: 1 });
+  }
+  return out;
+}
+
 // 他の路線の way で(ほぼ)完全に覆われている路線(例: 「A線・B線」と A線, B線)は冗長なので、
 // way 数の多い順に見て、残りの路線の和集合に含まれるものを落とす。
 function dropCovered(groups) {
@@ -204,18 +262,19 @@ function dropCovered(groups) {
   return alive;
 }
 
-function groupLines(cat, data) {
+function groupLines(cat, data, nodes) {
   const groups = new Map();
   for (const rel of data.elements) {
     if (rel.type !== 'relation') continue;
     const tags = rel.tags ?? {};
     const raw = tags['name:ja'] || tags.name || tags.ref || '';
-    const name = lineName(raw);
-    if (!name) continue;
-    const key = lineKey(name);
+    const base = lineName(raw);
+    if (!base) continue;
+    const name = canonicalName(base, tags);
+    const key = name;
     let g = groups.get(key);
     if (!g) {
-      g = { names: [], nameEn: '', operators: new Set(), colour: '', ways: new Map() };
+      g = { names: [], nameEn: '', operators: new Set(), colour: '', ways: new Map(), stops: [] };
       groups.set(key, g);
     }
     g.names.push(name);
@@ -223,19 +282,19 @@ function groupLines(cat, data) {
     if (!g.nameEn && tags['name:en']) g.nameEn = tags['name:en'].split(/\s*[(:]/)[0];
     if (!g.colour && tags.colour) g.colour = tags.colour;
     collectWays(rel, g);
+    collectStops(rel, g, nodes);
   }
   return [...groups.values()]
     .filter((g) => g.ways.size > 0)
     .map((g) => {
       const operators = [...g.operators];
-      let name = g.names.sort((a, b) => a.length - b.length)[0];
-      if (operators.some(isJR) && !/^JR/.test(name) && !/メトロ|都営|地下鉄/.test(name)) name = `JR${name}`;
+      const name = g.names[0];
       return { ...g, name, operators };
     });
 }
 
 // バスは系統番号(ref)でまとめる。ref が無い場合は名称から系統番号を取り出す。
-function groupBus(cat, data) {
+function groupBus(cat, data, nodes) {
   const groups = new Map();
   for (const rel of data.elements) {
     if (rel.type !== 'relation') continue;
@@ -252,6 +311,7 @@ function groupBus(cat, data) {
         colour: tags.colour || '',
         detail: new Set(),
         ways: new Map(),
+        stops: [],
       };
       groups.set(ref, g);
     }
@@ -259,6 +319,7 @@ function groupBus(cat, data) {
     const stops = raw.replace(/^.*系統(（[^）]*）)?\s*/, '');
     if (stops && stops !== raw) g.detail.add(stops);
     collectWays(rel, g);
+    collectStops(rel, g, nodes);
   }
   return [...groups.values()]
     .filter((g) => g.ways.size > 0)
@@ -280,11 +341,11 @@ function fallbackColour(name) {
   return `#${f(0)}${f(8)}${f(4)}`;
 }
 
-function build(key, cat, data) {
-  const lines = cat.groupBy === 'ref' ? groupBus(cat, data) : dropCovered(groupLines(cat, data));
-  const features = lines
-    .sort((a, b) => a.name.localeCompare(b.name, 'ja'))
-    .map((g, gid) => ({
+function build(key, cat, data, nodes) {
+  const lines = (cat.groupBy === 'ref' ? groupBus(cat, data, nodes) : dropCovered(groupLines(cat, data, nodes))).sort(
+    (a, b) => a.name.localeCompare(b.name, 'ja'),
+  );
+  const features = lines.map((g, gid) => ({
       type: 'Feature',
       properties: {
         gid,
@@ -301,14 +362,26 @@ function build(key, cat, data) {
       },
       geometry: { type: 'MultiLineString', coordinates: [...g.ways.values()].map((w) => simplify(w)) },
     }));
-  return { type: 'FeatureCollection', features };
+  const stopFeatures = lines.flatMap((g, gid) =>
+    mergeStops(g.stops).map((st) => ({
+      type: 'Feature',
+      properties: { gid, cat: key, name: st.name },
+      geometry: { type: 'Point', coordinates: [round(st.lon), round(st.lat)] },
+    })),
+  );
+  return {
+    lines: { type: 'FeatureCollection', features },
+    stops: { type: 'FeatureCollection', features: stopFeatures },
+  };
 }
 
 await mkdir(OUT_DIR, { recursive: true });
 for (const [key, cat] of Object.entries(CATEGORIES)) {
   const raw = await loadCategory(key, cat);
-  const fc = build(key, cat, raw);
-  const json = JSON.stringify(fc);
+  const nodes = await loadNodes(key, cat);
+  const { lines, stops } = build(key, cat, raw, nodes);
+  const json = JSON.stringify(lines);
   await writeFile(join(OUT_DIR, `${key}.geojson`), json);
-  console.log(`[${key}] ${fc.features.length} lines, ${(json.length / 1024).toFixed(0)} KB`);
+  await writeFile(join(OUT_DIR, `${key}-stops.geojson`), JSON.stringify(stops));
+  console.log(`[${key}] ${lines.features.length} lines (${(json.length / 1024).toFixed(0)} KB), ${stops.features.length} stops`);
 }
