@@ -45,7 +45,9 @@ const map = new maplibregl.Map({
     ],
   },
 });
-map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), 'top-right');
+// タッチ端末はピンチで拡大縮小できるので、ズームボタンは出さず地図の領域を空ける
+const isTouch = window.matchMedia('(pointer: coarse)').matches;
+map.addControl(new maplibregl.NavigationControl({ visualizePitch: false, showZoom: !isTouch }), 'top-right');
 map.addControl(
   new maplibregl.GeolocateControl({
     positionOptions: { enableHighAccuracy: true },
@@ -56,6 +58,37 @@ map.addControl(
   }),
   'top-right',
 );
+// 「東京」「日本全体」へ移動するアイコンボタン
+class JumpControl {
+  onAdd(m) {
+    const icons = {
+      tokyo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.800 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>',
+      japan: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.2 3 14.800 0 18M12 3c-3 3.200-3 14.800 0 18"/></svg>',
+    };
+    const targets = [
+      ['tokyo', '東京へ移動', TOKYO],
+      ['japan', '日本全体を表示', JAPAN],
+    ];
+    this.el = document.createElement('div');
+    this.el.className = 'maplibregl-ctrl maplibregl-ctrl-group';
+    for (const [key, label, target] of targets) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'jump-btn';
+      b.title = label;
+      b.setAttribute('aria-label', label);
+      b.innerHTML = icons[key];
+      b.addEventListener('click', () => m.flyTo({ ...target, duration: 1500 }));
+      this.el.append(b);
+    }
+    return this.el;
+  }
+
+  onRemove() {
+    this.el.remove();
+  }
+}
+map.addControl(new JumpControl(), 'top-right');
 map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
 
 const $ = (id) => document.getElementById(id);
@@ -66,15 +99,15 @@ const el = {
   title: $('panel-title'),
   sub: $('panel-sub'),
   detail: $('panel-detail'),
-  actions: $('panel-actions'),
   btnSolo: $('btn-solo'),
-  btnReset: $('btn-reset'),
   others: $('panel-others'),
   othersLabel: $('panel-others-label'),
   othersList: $('panel-others-list'),
   search: $('line-search'),
   list: $('line-list'),
   resetView: $('btn-reset-view'),
+  filterRow: $('filter-row'),
+  btnSearch: $('btn-search'),
 };
 
 // ---- 状態 ------------------------------------------------------------------
@@ -212,7 +245,7 @@ function applyView() {
     }
     for (const suffix of FILTERED) map.setFilter(`${key}-${suffix}`, filter);
   }
-  el.resetView.hidden = view.mode === 'all';
+  updateFilterRow();
   renderActions();
 }
 
@@ -231,14 +264,14 @@ function showOnly(sel, { fit = true } = {}) {
   applyView();
   select(sel);
   const f = lineOf(sel.cat, sel.gid);
-  el.search.value = f?.properties.name ?? '';
+  setSearchLabel(f?.properties.name ?? '');
   if (fit && f) fitTo(f);
 }
 
 function showStation(name, lngLat, lines) {
   ensureVisible(lines.map((l) => l.cat));
   view = { mode: 'station', name, lines };
-  el.search.value = '';
+  setSearchLabel(`${name}の接続路線`);
   setSelection(null);
   applyView();
   showStationPanel(name, lines);
@@ -247,7 +280,7 @@ function showStation(name, lngLat, lines) {
 
 function resetView() {
   view = { mode: 'all' };
-  el.search.value = '';
+  setSearchLabel('');
   applyView();
   if (panelState?.type === 'station') closePanel();
 }
@@ -319,8 +352,6 @@ function showStationPanel(name, lines) {
 function renderActions() {
   const lineSel = panelState?.type === 'line' ? panelState.sel : null;
   el.btnSolo.hidden = !lineSel || (view.mode === 'solo' && sameLine(view, lineSel));
-  el.btnReset.hidden = view.mode === 'all';
-  el.actions.hidden = el.btnSolo.hidden && el.btnReset.hidden;
 }
 
 function select(sel, others = []) {
@@ -367,22 +398,11 @@ function connectedLines(name, [lon, lat], cat) {
   );
 }
 
-function showStopPopup(lngLat, name, lineNames) {
+function showStopPopup(lngLat, name) {
   popup?.remove();
-  const box = document.createElement('div');
-  const title = document.createElement('strong');
-  title.textContent = name;
-  box.append(title);
-  if (lineNames.length) {
-    const sub = document.createElement('div');
-    sub.className = 'popup-lines';
-    const shown = lineNames.slice(0, 6).join(' / ');
-    sub.textContent = lineNames.length > 6 ? `${shown} ほか${lineNames.length - 6}路線` : shown;
-    box.append(sub);
-  }
-  popup = new maplibregl.Popup({ offset: 12, closeButton: false, maxWidth: '260px' })
+  popup = new maplibregl.Popup({ offset: 12, closeButton: false, maxWidth: '220px' })
     .setLngLat(lngLat)
-    .setDOMContent(box)
+    .setText(name)
     .addTo(map);
 }
 
@@ -409,11 +429,7 @@ map.on('click', (e) => {
     const { name, cat } = stop.properties;
     const coords = stop.geometry.coordinates;
     const lines = connectedLines(name, coords, cat);
-    showStopPopup(
-      coords,
-      name,
-      lines.map((l) => lineOf(l.cat, l.gid).properties.name),
-    );
+    showStopPopup(coords, name);
     if (lines.length >= 2) {
       // ターミナル駅: 接続している路線だけを表示する
       showStation(name, coords, lines);
@@ -463,10 +479,26 @@ function buildSearchItems() {
 
 const MAX_ITEMS = 80;
 
+// 検索欄は、絞り込み中はその内容(路線名・駅名)を表示するラベルを兼ねる
+let searchLabel = '';
+let searchOpen = false;
+
+function setSearchLabel(text) {
+  searchLabel = text;
+  el.search.value = text;
+}
+
+// 検索欄は、検索アイコンで開いているか、絞り込み中のときだけ表示する
+function updateFilterRow() {
+  el.filterRow.hidden = !(searchOpen || view.mode !== 'all');
+  el.resetView.hidden = view.mode === 'all';
+  el.btnSearch.setAttribute('aria-pressed', String(!el.filterRow.hidden));
+}
+
 function renderList() {
   const q = el.search.value.trim().toLowerCase();
-  // 1路線だけ表示中に、その路線名のまま開いたときは全件を出す
-  const filterText = view.mode === 'solo' && el.search.value === lineOf(view.cat, view.gid)?.properties.name ? '' : q;
+  // ラベルのまま開いたときは全件を出す
+  const filterText = searchLabel && el.search.value === searchLabel ? '' : q;
   const matches = searchItems.filter((it) => !filterText || it.text.includes(filterText));
   const nodes = matches.slice(0, MAX_ITEMS).map((it) => {
     const li = document.createElement('li');
@@ -510,12 +542,24 @@ function chooseItem(li) {
   if (!li?.dataset.gid) return;
   closeList();
   el.search.blur();
+  searchOpen = false;
   showOnly({ cat: li.dataset.cat, gid: Number(li.dataset.gid) });
 }
 
 el.search.addEventListener('focus', () => {
   el.search.select();
   openList();
+});
+el.btnSearch.addEventListener('click', () => {
+  if (view.mode !== 'all') {
+    // 絞り込み中は検索欄を開いて別の路線を選べるようにする
+    el.search.focus();
+    return;
+  }
+  searchOpen = !searchOpen;
+  updateFilterRow();
+  if (searchOpen) el.search.focus();
+  else closeList();
 });
 el.search.addEventListener('input', openList);
 el.search.addEventListener('keydown', (e) => {
@@ -528,19 +572,15 @@ el.search.addEventListener('keydown', (e) => {
 });
 el.list.addEventListener('click', (e) => chooseItem(e.target.closest('li')));
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('.search')) closeList();
+  if (!e.target.closest('.search') && !e.target.closest('#btn-search')) closeList();
 });
 
 // ---- その他の UI ------------------------------------------------------------
 
 $('panel-close').addEventListener('click', clearSelection);
 el.btnSolo.addEventListener('click', () => panelState?.sel && showOnly(panelState.sel, { fit: false }));
-el.btnReset.addEventListener('click', resetView);
 el.resetView.addEventListener('click', resetView);
 window.addEventListener('keydown', (e) => e.key === 'Escape' && clearSelection());
-
-$('btn-tokyo').addEventListener('click', () => map.flyTo({ ...TOKYO, duration: 1500 }));
-$('btn-japan').addEventListener('click', () => map.flyTo({ ...JAPAN, duration: 1500 }));
 
 document.querySelectorAll('#controls input[data-cat]').forEach((input) => {
   input.addEventListener('change', () => {
@@ -549,7 +589,7 @@ document.querySelectorAll('#controls input[data-cat]').forEach((input) => {
     if (!input.checked && selected?.cat === key) clearSelection();
     // 絞り込み中にカテゴリを切り替えたら、絞り込みを解除して通常表示に戻す
     view = { mode: 'all' };
-    el.search.value = '';
+    setSearchLabel('');
     if (panelState?.type === 'station') closePanel();
     applyView();
   });

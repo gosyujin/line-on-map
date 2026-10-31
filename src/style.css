@@ -1,9 +1,10 @@
 :root {
-  --panel-bg: rgba(255, 255, 255, 0.94);
+  --panel-bg: rgba(255, 255, 255, 0.95);
   --fg: #222;
   --muted: #666;
-  --border: rgba(0, 0, 0, 0.12);
+  --border: rgba(0, 0, 0, 0.14);
   --accent: #ff8a00;
+  --shadow: 0 1px 6px rgba(0, 0, 0, 0.28);
   color-scheme: light;
 }
 
@@ -23,46 +24,80 @@ body {
   color: var(--fg);
 }
 
-#controls,
-#panel,
-#status {
-  position: absolute;
-  z-index: 2;
-  background: var(--panel-bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(6px);
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
 }
 
+[hidden] {
+  display: none !important;
+}
+
+/* ---- 上部コントロール ---------------------------------------------------- */
+
 #controls {
-  top: calc(10px + env(safe-area-inset-top));
-  left: 10px;
-  width: 232px;
-  max-width: calc(100% - 70px);
-  padding: 10px 12px;
+  position: absolute;
+  z-index: 2;
+  top: calc(8px + env(safe-area-inset-top));
+  left: 8px;
+  max-width: calc(100% - 64px);
   display: flex;
   flex-direction: column;
   gap: 6px;
-  font-size: 14px;
 }
 
-#controls h1 {
-  margin: 0 0 2px;
-  font-size: 15px;
-}
-
-#controls label {
+#controls .row,
+#filter-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  cursor: pointer;
-  user-select: none;
-  min-height: 28px;
 }
 
-#controls small {
-  color: var(--muted);
+.round {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--panel-bg);
+  box-shadow: var(--shadow);
+}
+
+.pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 36px;
+  padding: 0 11px;
+  border-radius: 18px;
+  background: var(--panel-bg);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+}
+
+.pill input {
+  position: absolute;
+  opacity: 0;
+  inset: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* チェックを外した種別は薄く表示 */
+.pill:has(input:not(:checked)) {
+  opacity: 0.55;
+}
+
+.pill:has(input:not(:checked)) .dot {
+  background: #aaa;
 }
 
 .dot {
@@ -72,144 +107,29 @@ body {
   background: var(--c);
 }
 
-.buttons {
-  display: flex;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-button {
-  font: inherit;
-  cursor: pointer;
-}
-
-.buttons button {
-  flex: 1;
-  padding: 5px 8px;
-  font-size: 13px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fff;
-}
-
-#panel {
-  left: 50%;
-  bottom: calc(24px + env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  width: min(440px, calc(100% - 20px));
-  padding: 14px 40px 14px 16px;
-  border-left: 6px solid var(--accent);
-}
-
-#panel[hidden],
-#panel [hidden] {
-  display: none;
-}
-
-#panel h2 {
-  margin: 4px 0 2px;
-  font-size: 18px;
-}
-
-#panel p {
-  margin: 2px 0;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-#panel-close {
-  position: absolute;
-  top: 6px;
-  right: 8px;
-  width: 30px;
-  height: 30px;
-  border: 0;
-  background: none;
-  font-size: 22px;
-  line-height: 1;
-  color: var(--muted);
-}
-
-.badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 10px;
-  font-size: 11px;
+#btn-search[aria-pressed='true'] {
+  background: var(--accent);
   color: #fff;
-  background: var(--c, #666);
 }
 
-#panel-others {
-  margin-top: 8px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-#panel-others-list {
-  max-height: 28vh;
-  overflow-y: auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-#panel-others-list button {
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-left: 4px solid var(--c, #666);
-  border-radius: 6px;
-  background: #fff;
-  font-size: 12px;
-}
-
-#status {
-  top: calc(10px + env(safe-area-inset-top));
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 6px 14px;
-  font-size: 13px;
-}
-
-#status[hidden] {
-  display: none;
-}
-
-@media (max-width: 520px) {
-  #controls {
-    font-size: 13px;
-    padding: 8px 10px;
-  }
-  #status {
-    top: auto;
-    bottom: calc(44px + env(safe-area-inset-bottom));
-  }
-}
-
-.maplibregl-popup-content {
-  padding: 8px 12px;
-  font-size: 14px;
-  border-radius: 8px;
-}
-
-.popup-lines {
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--muted);
-}
+/* ---- 路線検索 ------------------------------------------------------------ */
 
 .search {
   position: relative;
+  flex: 1;
+  min-width: 190px;
 }
 
 #line-search {
   width: 100%;
-  padding: 6px 8px;
+  height: 36px;
+  padding: 0 12px;
   font: inherit;
   font-size: 16px; /* iOS Safari でフォーカス時に拡大されないよう 16px 以上にする */
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fff;
+  border: 0;
+  border-radius: 18px;
+  background: var(--panel-bg);
+  box-shadow: var(--shadow);
 }
 
 #line-list {
@@ -225,12 +145,8 @@ button {
   list-style: none;
   background: #fff;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
-}
-
-#line-list[hidden] {
-  display: none;
+  border-radius: 10px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
 }
 
 #line-list li {
@@ -238,7 +154,7 @@ button {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  padding: 7px 8px;
+  padding: 8px;
   border-left: 4px solid var(--c, transparent);
   border-radius: 4px;
   font-size: 14px;
@@ -262,28 +178,169 @@ button {
   cursor: default;
 }
 
-#btn-reset-view,
-#panel-actions button {
-  padding: 6px 10px;
-  font-size: 13px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fff;
-}
-
 #btn-reset-view {
-  border-color: var(--accent);
-  color: #b35f00;
-  font-weight: 600;
+  background: var(--accent);
+  color: #fff;
 }
 
-#btn-reset-view[hidden],
-#panel-actions[hidden] {
+/* ---- 地図右側のアイコンボタン ----------------------------------------------- */
+
+.maplibregl-ctrl-group button.jump-btn {
+  display: grid;
+  place-items: center;
+}
+
+.maplibregl-ctrl-group button.jump-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* ---- 下部パネル ------------------------------------------------------------ */
+
+#panel {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  right: 0;
+  bottom: calc(8px + env(safe-area-inset-bottom));
+  margin: 0 auto;
+  width: min(480px, calc(100% - 16px));
+  padding: 8px 34px 8px 12px;
+  background: var(--panel-bg);
+  border-left: 5px solid var(--accent);
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(6px);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#panel h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--c, #666);
+}
+
+.panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+#panel p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#panel-sub {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#panel-detail {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-top: 2px !important;
+}
+
+#btn-solo {
+  flex: none;
+  padding: 3px 9px;
+  font-size: 12px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: #fff;
+  color: #b35f00;
+}
+
+#panel-close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  background: none;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+#panel-others {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 候補が多いので、折り返さず横スクロールの1行にしてパネルを小さく保つ */
+#panel-others-list {
+  display: flex;
+  gap: 6px;
+  margin-top: 3px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+#panel-others-list::-webkit-scrollbar {
   display: none;
 }
 
-#panel-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
+#panel-others-list button {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--c, #666);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* ---- その他 ---------------------------------------------------------------- */
+
+#status {
+  position: absolute;
+  z-index: 2;
+  top: calc(52px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 14px;
+  font-size: 13px;
+  white-space: nowrap;
+  background: var(--panel-bg);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+}
+
+.maplibregl-popup-content {
+  padding: 5px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
 }

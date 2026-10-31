@@ -11,31 +11,36 @@
     <div id="map"></div>
 
     <aside id="controls" aria-label="表示切り替え">
-      <h1>Line on Map</h1>
-      <label><input type="checkbox" data-cat="train" checked /><i class="dot" style="--c:#00a040"></i>電車</label>
-      <label><input type="checkbox" data-cat="subway" checked /><i class="dot" style="--c:#0072bc"></i>地下鉄</label>
-      <label><input type="checkbox" data-cat="bus" checked /><i class="dot" style="--c:#d9531e"></i>バス<small>(都営)</small></label>
-      <div class="search">
-        <input id="line-search" type="search" placeholder="路線を検索して1本だけ表示" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="line-list" disabled />
-        <ul id="line-list" role="listbox" hidden></ul>
+      <div class="row">
+        <button type="button" id="btn-search" class="round" aria-label="路線を検索" title="路線を検索して1本だけ表示">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M15.5 15.5 21 21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+        </button>
+        <label class="pill" title="電車"><input type="checkbox" data-cat="train" checked /><i class="dot" style="--c:#00a040"></i>電車</label>
+        <label class="pill" title="地下鉄"><input type="checkbox" data-cat="subway" checked /><i class="dot" style="--c:#0072bc"></i>地下鉄</label>
+        <label class="pill" title="バス(都営)"><input type="checkbox" data-cat="bus" checked /><i class="dot" style="--c:#d9531e"></i>バス</label>
       </div>
-      <button type="button" id="btn-reset-view" hidden>全路線を表示に戻す</button>
-      <div class="buttons">
-        <button type="button" id="btn-tokyo">東京</button>
-        <button type="button" id="btn-japan">日本全体</button>
+      <div id="filter-row" hidden>
+        <div class="search">
+          <input id="line-search" type="search" placeholder="路線名で検索" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="line-list" disabled />
+          <ul id="line-list" role="listbox" hidden></ul>
+        </div>
+        <button type="button" id="btn-reset-view" class="round" aria-label="全路線を表示に戻す" title="全路線を表示に戻す" hidden>
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+        </button>
       </div>
     </aside>
 
     <section id="panel" hidden aria-live="polite">
       <button type="button" id="panel-close" aria-label="選択を解除">×</button>
-      <div class="badge" id="panel-badge"></div>
-      <h2 id="panel-title"></h2>
-      <p id="panel-sub"></p>
-      <p id="panel-detail"></p>
-      <div id="panel-actions" hidden>
-        <button type="button" id="btn-solo">この路線だけ表示</button>
-        <button type="button" id="btn-reset">全路線を表示</button>
+      <div class="panel-head">
+        <span class="badge" id="panel-badge"></span>
+        <h2 id="panel-title"></h2>
       </div>
+      <div class="panel-meta">
+        <p id="panel-sub"></p>
+        <button type="button" id="btn-solo" hidden>この路線だけ表示</button>
+      </div>
+      <p id="panel-detail"></p>
       <div id="panel-others" hidden>
         <span id="panel-others-label">この地点を通る他の路線</span>
         <div id="panel-others-list"></div>
