@@ -325,8 +325,17 @@ button {
   -webkit-overflow-scrolling: touch;
 }
 
-#panel-others-list::-webkit-scrollbar {
-  display: none;
+/* マウス操作の端末ではスクロールできると分かるよう、細いスクロールバーを出す */
+@media (pointer: fine) {
+  #panel-others-list {
+    scrollbar-width: thin;
+  }
+}
+
+@media (pointer: coarse) {
+  #panel-others-list::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 #panel-others-list button {

@@ -676,6 +676,18 @@ document.addEventListener('click', (e) => {
 
 // ---- その他の UI ------------------------------------------------------------
 
+// マウスホイールの縦回転で、他の路線の一覧(横スクロール)を動かせるようにする
+el.othersList.addEventListener(
+  'wheel',
+  (e) => {
+    const list = el.othersList;
+    if (list.scrollWidth <= list.clientWidth || Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+    list.scrollLeft += e.deltaY;
+    e.preventDefault();
+  },
+  { passive: false },
+);
+
 $('panel-close').addEventListener('click', clearSelection);
 el.btnSolo.addEventListener('click', () => panelState?.sel && showOnly(panelState.sel, { fit: false }));
 el.resetView.addEventListener('click', resetView);

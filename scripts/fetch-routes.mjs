@@ -28,7 +28,8 @@ const ENDPOINTS = (process.env.OVERPASS_URL ? [process.env.OVERPASS_URL] : []).c
 // filter は種別ごとの追加条件。バスは数が多いので東京は都営バスのみに絞る。
 const AREAS = [
   { id: 'tokyo', name: '東京', bbox: [35.45, 139.35, 35.85, 139.95], filter: { bus: '["operator"~"東京都交通局|都営|Toei"]' } },
-  { id: 'chiba', name: '千葉', bbox: [35.5, 139.9, 35.95, 140.3], filter: {} },
+  // 東端は成田空港(東経140.39°)まで含める
+  { id: 'chiba', name: '千葉', bbox: [35.5, 139.9, 35.95, 140.5], filter: {} },
 ];
 // 範囲外へ長く伸びる路線(東海道線など)を切り落とすための余白付きクリップ範囲
 const CLIP_MARGIN = 0.05;
@@ -149,6 +150,10 @@ const COMPANY_SHORT = {
   相模鉄道: '相鉄',
   東京地下鉄: '東京メトロ',
 };
+// 成田スカイアクセス線は OSM に「京成成田空港アクセス (京成上野 → 成田空港)」という列車サービスの
+// リレーションしかないため、サービス名の除外対象にせず、他の路線と共有しない区間だけを1路線にする。
+const SKY_ACCESS = /成田空港アクセス/;
+const SKY_ACCESS_NAME = '京成成田スカイアクセス線';
 const KEY_ALIAS = { JR常磐線快速: 'JR常磐快速線', JR中央線JC: 'JR中央線', 総武本線: 'JR総武本線' };
 
 // "JR京浜東北線・根岸線 各駅停車 (南浦和 → 大船)" → "JR京浜東北線・根岸線"
@@ -288,13 +293,31 @@ function dropCovered(groups) {
   return alive;
 }
 
+// 他の路線と共有している way と、印旛日本医大より西の区間(北総線・京成本線側)を落とす
+const SKY_ACCESS_MIN_LON = 140.19;
+
+function trimSkyAccess(groups) {
+  const sky = groups.get(SKY_ACCESS_NAME);
+  if (!sky) return;
+  const others = new Set([...groups.entries()].filter(([k]) => k !== SKY_ACCESS_NAME).flatMap(([, g]) => [...g.ways.keys()]));
+  for (const [id, way] of [...sky.ways]) {
+    if (others.has(id) || way.every(([lon]) => lon < SKY_ACCESS_MIN_LON)) sky.ways.delete(id);
+  }
+  const pts = [...sky.ways.values()].flat();
+  if (!pts.length) return;
+  const m = 0.01;
+  const [w, e] = [Math.min(...pts.map((p) => p[0])) - m, Math.max(...pts.map((p) => p[0])) + m];
+  const [so, n] = [Math.min(...pts.map((p) => p[1])) - m, Math.max(...pts.map((p) => p[1])) + m];
+  sky.stops = sky.stops.filter((st) => st.lon >= w && st.lon <= e && st.lat >= so && st.lat <= n);
+}
+
 function groupLines(cat, data, nodes) {
   const groups = new Map();
   for (const rel of data.elements) {
     if (rel.type !== 'relation') continue;
     const tags = rel.tags ?? {};
     const raw = tags['name:ja'] || tags.name || tags.ref || '';
-    const base = lineName(raw);
+    const base = SKY_ACCESS.test(raw) && /train/.test(cat.query) ? SKY_ACCESS_NAME : lineName(raw);
     if (!base) continue;
     const name = canonicalName(base, tags);
     const key = name;
@@ -310,6 +333,7 @@ function groupLines(cat, data, nodes) {
     collectWays(rel, g);
     collectStops(rel, g, nodes);
   }
+  trimSkyAccess(groups);
   return [...groups.values()]
     .filter((g) => g.ways.size > 0)
     .map((g) => {
