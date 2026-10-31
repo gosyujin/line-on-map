@@ -38,6 +38,8 @@ body {
 #controls {
   top: calc(10px + env(safe-area-inset-top));
   left: 10px;
+  width: 232px;
+  max-width: calc(100% - 70px);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
@@ -194,4 +196,94 @@ button {
   margin-top: 2px;
   font-size: 11px;
   color: var(--muted);
+}
+
+.search {
+  position: relative;
+}
+
+#line-search {
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 16px; /* iOS Safari でフォーカス時に拡大されないよう 16px 以上にする */
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+#line-list {
+  position: absolute;
+  z-index: 3;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: min(50vh, 320px);
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  list-style: none;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+}
+
+#line-list[hidden] {
+  display: none;
+}
+
+#line-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-left: 4px solid var(--c, transparent);
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+#line-list li:hover {
+  background: #f1f1f1;
+}
+
+#line-list li small {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#line-list li.more {
+  border-left-color: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: default;
+}
+
+#btn-reset-view,
+#panel-actions button {
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
+#btn-reset-view {
+  border-color: var(--accent);
+  color: #b35f00;
+  font-weight: 600;
+}
+
+#btn-reset-view[hidden],
+#panel-actions[hidden] {
+  display: none;
+}
+
+#panel-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }

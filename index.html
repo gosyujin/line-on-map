@@ -15,6 +15,11 @@
       <label><input type="checkbox" data-cat="train" checked /><i class="dot" style="--c:#00a040"></i>電車</label>
       <label><input type="checkbox" data-cat="subway" checked /><i class="dot" style="--c:#0072bc"></i>地下鉄</label>
       <label><input type="checkbox" data-cat="bus" checked /><i class="dot" style="--c:#d9531e"></i>バス<small>(都営)</small></label>
+      <div class="search">
+        <input id="line-search" type="search" placeholder="路線を検索して1本だけ表示" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="line-list" disabled />
+        <ul id="line-list" role="listbox" hidden></ul>
+      </div>
+      <button type="button" id="btn-reset-view" hidden>全路線を表示に戻す</button>
       <div class="buttons">
         <button type="button" id="btn-tokyo">東京</button>
         <button type="button" id="btn-japan">日本全体</button>
@@ -27,8 +32,12 @@
       <h2 id="panel-title"></h2>
       <p id="panel-sub"></p>
       <p id="panel-detail"></p>
+      <div id="panel-actions" hidden>
+        <button type="button" id="btn-solo">この路線だけ表示</button>
+        <button type="button" id="btn-reset">全路線を表示</button>
+      </div>
       <div id="panel-others" hidden>
-        <span>この地点を通る他の路線</span>
+        <span id="panel-others-label">この地点を通る他の路線</span>
         <div id="panel-others-list"></div>
       </div>
     </section>

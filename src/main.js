@@ -9,6 +9,7 @@ const CATEGORIES = [
   { key: 'subway', label: '地下鉄', width: [10, 2, 15, 6] },
 ];
 const LABELS = Object.fromEntries(CATEGORIES.map((c) => [c.key, c.label]));
+const CAT_ORDER = { subway: 0, train: 1, bus: 2 };
 
 const TOKYO = { center: [139.76, 35.68], zoom: 10.6 };
 const JAPAN = { center: [137.5, 37.5], zoom: 4.6 };
@@ -19,21 +20,29 @@ const map = new maplibregl.Map({
   center: JAPAN.center,
   zoom: JAPAN.zoom,
   minZoom: 3,
-  maxZoom: 18,
+  maxZoom: 19,
   attributionControl: { compact: true },
   style: {
     version: 8,
     sources: {
-      gsi: {
+      osm: {
         type: 'raster',
-        tiles: ['https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png'],
+        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
         tileSize: 256,
-        maxzoom: 18,
+        maxzoom: 19,
         attribution:
-          '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a> | 路線データ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
+          '地図・路線データ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
       },
     },
-    layers: [{ id: 'gsi', type: 'raster', source: 'gsi' }],
+    layers: [
+      {
+        id: 'osm',
+        type: 'raster',
+        source: 'osm',
+        // 路線の色が目立つように、背景地図の彩度を少し落とす
+        paint: { 'raster-saturation': -0.55, 'raster-brightness-min': 0.12 },
+      },
+    ],
   },
 });
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), 'top-right');
@@ -49,31 +58,50 @@ map.addControl(
 );
 map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-right');
 
+const $ = (id) => document.getElementById(id);
 const el = {
-  status: document.getElementById('status'),
-  panel: document.getElementById('panel'),
-  badge: document.getElementById('panel-badge'),
-  title: document.getElementById('panel-title'),
-  sub: document.getElementById('panel-sub'),
-  detail: document.getElementById('panel-detail'),
-  others: document.getElementById('panel-others'),
-  othersList: document.getElementById('panel-others-list'),
+  status: $('status'),
+  panel: $('panel'),
+  badge: $('panel-badge'),
+  title: $('panel-title'),
+  sub: $('panel-sub'),
+  detail: $('panel-detail'),
+  actions: $('panel-actions'),
+  btnSolo: $('btn-solo'),
+  btnReset: $('btn-reset'),
+  others: $('panel-others'),
+  othersLabel: $('panel-others-label'),
+  othersList: $('panel-others-list'),
+  search: $('line-search'),
+  list: $('line-list'),
+  resetView: $('btn-reset-view'),
 };
 
-// カテゴリごとの路線データ(検索・fitBounds 用に保持)
-const featuresByCat = {};
-let selected = null; // { cat, gid }
+// ---- 状態 ------------------------------------------------------------------
 
-const baseLayerIds = CATEGORIES.map((c) => `${c.key}-line`);
+const featuresByCat = {}; // 路線データ
+let allStops = []; // 全カテゴリの駅・停留所(接続路線の検索用)
+let selected = null; // 強調表示中の路線 { cat, gid }
+// 表示モード: 全路線 / 1路線だけ / 駅に接続する路線だけ
+let view = { mode: 'all' };
+const catVisible = Object.fromEntries(CATEGORIES.map((c) => [c.key, true]));
+let panelState = null; // { type: 'line', sel } | { type: 'station' }
+
+const lineLayerIds = CATEGORIES.map((c) => `${c.key}-line`);
 const hitLayerIds = CATEGORIES.map((c) => `${c.key}-hit`);
+const FILTERED = ['casing', 'line', 'hit', 'stop'];
+const ALL_SUFFIXES = [...FILTERED, 'glow', 'sel-casing', 'sel-line', 'stop-sel'];
+
+const lineOf = (cat, gid) => featuresByCat[cat]?.find((f) => f.properties.gid === gid);
+const sameLine = (a, b) => a && b && a.cat === b.cat && a.gid === b.gid;
+
+// ---- レイヤー --------------------------------------------------------------
 
 function addCategoryLayers({ key, width }) {
-  const src = key;
+  const base = { type: 'line', source: key, layout: { 'line-cap': 'round', 'line-join': 'round' } };
   map.addLayer({
+    ...base,
     id: `${key}-casing`,
-    type: 'line',
-    source: src,
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': '#fff',
       'line-width': ['interpolate', ['linear'], ['zoom'], ...width.map((v, i) => (i % 2 ? v + 1.5 : v))],
@@ -81,10 +109,8 @@ function addCategoryLayers({ key, width }) {
     },
   });
   map.addLayer({
+    ...base,
     id: `${key}-line`,
-    type: 'line',
-    source: src,
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
       'line-color': ['get', 'colour'],
       'line-width': ['interpolate', ['linear'], ['zoom'], ...width],
@@ -93,10 +119,8 @@ function addCategoryLayers({ key, width }) {
   });
   // タップしやすいように、見た目より太い透明レイヤーでヒット判定する
   map.addLayer({
+    ...base,
     id: `${key}-hit`,
-    type: 'line',
-    source: src,
-    layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: { 'line-color': '#000', 'line-opacity': 0, 'line-width': 14 },
   });
 }
@@ -105,7 +129,7 @@ function addHighlightLayers() {
   const none = ['==', ['get', 'gid'], -1];
   for (const { key, width } of CATEGORIES) {
     const common = { type: 'line', source: key, filter: none, layout: { 'line-cap': 'round', 'line-join': 'round' } };
-    // 添付画像のようなオレンジのグロー
+    // オレンジのグロー
     map.addLayer({
       ...common,
       id: `${key}-glow`,
@@ -127,7 +151,10 @@ function addHighlightLayers() {
     map.addLayer({
       ...common,
       id: `${key}-sel-line`,
-      paint: { 'line-color': ['get', 'colour'], 'line-width': ['interpolate', ['linear'], ['zoom'], ...width.map((v, i) => (i % 2 ? v + 1 : v))] },
+      paint: {
+        'line-color': ['get', 'colour'],
+        'line-width': ['interpolate', ['linear'], ['zoom'], ...width.map((v, i) => (i % 2 ? v + 1 : v))],
+      },
     });
   }
 }
@@ -167,6 +194,66 @@ function addStopLayers() {
   }
 }
 
+// ---- 表示モード(全路線 / 1路線だけ / 駅の接続路線だけ) -----------------------
+
+function allowedGids(cat) {
+  if (view.mode === 'solo') return view.cat === cat ? [view.gid] : [];
+  if (view.mode === 'station') return view.lines.filter((l) => l.cat === cat).map((l) => l.gid);
+  return null; // 制限なし
+}
+
+function applyView() {
+  for (const { key } of CATEGORIES) {
+    const gids = allowedGids(key);
+    const visible = catVisible[key] && (gids === null || gids.length > 0);
+    const filter = gids === null ? null : ['in', ['get', 'gid'], ['literal', gids]];
+    for (const suffix of ALL_SUFFIXES) {
+      map.setLayoutProperty(`${key}-${suffix}`, 'visibility', visible ? 'visible' : 'none');
+    }
+    for (const suffix of FILTERED) map.setFilter(`${key}-${suffix}`, filter);
+  }
+  el.resetView.hidden = view.mode === 'all';
+  renderActions();
+}
+
+// 表示対象のカテゴリが非表示にされていたら表示に戻す
+function ensureVisible(cats) {
+  for (const cat of cats) {
+    catVisible[cat] = true;
+    document.querySelector(`#controls input[data-cat="${cat}"]`).checked = true;
+  }
+}
+
+function showOnly(sel, { fit = true } = {}) {
+  ensureVisible([sel.cat]);
+  view = { mode: 'solo', ...sel };
+  popup?.remove();
+  applyView();
+  select(sel);
+  const f = lineOf(sel.cat, sel.gid);
+  el.search.value = f?.properties.name ?? '';
+  if (fit && f) fitTo(f);
+}
+
+function showStation(name, lngLat, lines) {
+  ensureVisible(lines.map((l) => l.cat));
+  view = { mode: 'station', name, lines };
+  el.search.value = '';
+  setSelection(null);
+  applyView();
+  showStationPanel(name, lines);
+  map.easeTo({ center: lngLat, zoom: Math.max(map.getZoom(), 12), duration: 600 });
+}
+
+function resetView() {
+  view = { mode: 'all' };
+  el.search.value = '';
+  applyView();
+  if (panelState?.type === 'station') closePanel();
+}
+
+// ---- 選択(強調表示)とパネル ------------------------------------------------
+
 function setSelection(sel) {
   selected = sel;
   for (const { key } of CATEGORIES) {
@@ -174,135 +261,179 @@ function setSelection(sel) {
     for (const suffix of ['glow', 'sel-casing', 'sel-line', 'stop-sel']) map.setFilter(`${key}-${suffix}`, filter);
   }
   // 選択中は他の路線を薄くして、強調を目立たせる
-  for (const id of baseLayerIds) map.setPaintProperty(id, 'line-opacity', sel ? 0.35 : 1);
+  for (const id of lineLayerIds) map.setPaintProperty(id, 'line-opacity', sel ? 0.35 : 1);
   for (const { key } of CATEGORIES) {
     map.setPaintProperty(`${key}-stop`, 'circle-opacity', sel ? 0.4 : 1);
     map.setPaintProperty(`${key}-stop`, 'circle-stroke-opacity', sel ? 0.4 : 1);
   }
 }
 
-function findFeature(cat, gid) {
-  return featuresByCat[cat]?.find((f) => f.properties.gid === gid);
+function chip(sel, onClick) {
+  const f = lineOf(sel.cat, sel.gid);
+  if (!f) return null;
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = f.properties.name;
+  b.style.setProperty('--c', f.properties.colour);
+  b.addEventListener('click', onClick);
+  return b;
 }
 
-function showPanel(sel, others = []) {
-  const f = findFeature(sel.cat, sel.gid);
+function fillChips(label, sels, onClick) {
+  el.othersList.replaceChildren(...sels.map((s) => chip(s, () => onClick(s))).filter(Boolean));
+  el.othersLabel.textContent = label;
+  el.others.hidden = el.othersList.childElementCount === 0;
+}
+
+function showLinePanel(sel, others = []) {
+  const f = lineOf(sel.cat, sel.gid);
   if (!f) return;
   const p = f.properties;
+  panelState = { type: 'line', sel };
   el.panel.hidden = false;
-  el.panel.style.borderLeftColor = HIGHLIGHT;
   el.badge.textContent = LABELS[p.cat];
   el.badge.style.setProperty('--c', p.colour);
   el.title.textContent = p.name;
   el.sub.textContent = [p.operator, p.nameEn].filter(Boolean).join(' / ');
   el.detail.textContent = p.detail || '';
   el.detail.hidden = !p.detail;
+  fillChips('この地点を通る他の路線', others, (o) => {
+    select(o, [sel, ...others.filter((x) => !sameLine(x, o))]);
+    fitTo(lineOf(o.cat, o.gid));
+  });
+  renderActions();
+}
 
-  el.othersList.replaceChildren();
-  for (const o of others) {
-    const of = findFeature(o.cat, o.gid);
-    if (!of) continue;
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = of.properties.name;
-    b.style.setProperty('--c', of.properties.colour);
-    b.addEventListener('click', () => {
-      select(o, [sel, ...others.filter((x) => x !== o)]);
-      fitTo(of);
-    });
-    el.othersList.append(b);
-  }
-  el.others.hidden = el.othersList.childElementCount === 0;
+function showStationPanel(name, lines) {
+  panelState = { type: 'station' };
+  el.panel.hidden = false;
+  el.badge.textContent = '駅・停留所';
+  el.badge.style.setProperty('--c', '#555');
+  el.title.textContent = name;
+  el.sub.textContent = `${lines.length} 路線が接続`;
+  el.detail.hidden = true;
+  fillChips('路線を選ぶとその路線だけ表示します', lines, (o) => showOnly(o));
+  renderActions();
+}
+
+function renderActions() {
+  const lineSel = panelState?.type === 'line' ? panelState.sel : null;
+  el.btnSolo.hidden = !lineSel || (view.mode === 'solo' && sameLine(view, lineSel));
+  el.btnReset.hidden = view.mode === 'all';
+  el.actions.hidden = el.btnSolo.hidden && el.btnReset.hidden;
 }
 
 function select(sel, others = []) {
   setSelection(sel);
-  showPanel(sel, others);
+  showLinePanel(sel, others);
+}
+
+function closePanel() {
+  el.panel.hidden = true;
+  panelState = null;
 }
 
 function clearSelection() {
   setSelection(null);
-  el.panel.hidden = true;
+  closePanel();
 }
 
 function fitTo(feature) {
   const b = new maplibregl.LngLatBounds();
   for (const line of feature.geometry.coordinates) for (const c of line) b.extend(c);
-  map.fitBounds(b, { padding: { top: 60, left: 60, right: 60, bottom: 200 }, maxZoom: 14, duration: 700 });
+  map.fitBounds(b, { padding: { top: 60, left: 60, right: 60, bottom: 220 }, maxZoom: 14, duration: 700 });
 }
 
-function visibleHitLayers() {
-  return hitLayerIds.filter((id) => map.getLayoutProperty(id, 'visibility') !== 'none');
-}
+// ---- 駅 ------------------------------------------------------------------
 
 let popup = null;
 
-function showStopPopup(lngLat, name, lines) {
+// 「新宿駅西口」→「新宿」のように、駅名の部分だけで同じ駅かを判定する
+const stationKey = (name) => name.replace(/\s/g, '').replace(/駅.*$/, '') || name;
+
+// クリックした駅・停留所に接続している路線(同名で近くにある駅を持つ路線)
+function connectedLines(name, [lon, lat], cat) {
+  const key = stationKey(name);
+  const r = cat === 'bus' ? 0.003 : 0.006; // 度。バス停同士は近いものだけ同一視する
+  const found = new Map();
+  for (const s of allStops) {
+    if (s.key !== key || Math.abs(s.lon - lon) > r || Math.abs(s.lat - lat) > r) continue;
+    found.set(`${s.cat}:${s.gid}`, { cat: s.cat, gid: s.gid });
+  }
+  return [...found.values()].sort(
+    (a, b) =>
+      CAT_ORDER[a.cat] - CAT_ORDER[b.cat] ||
+      lineOf(a.cat, a.gid).properties.name.localeCompare(lineOf(b.cat, b.gid).properties.name, 'ja'),
+  );
+}
+
+function showStopPopup(lngLat, name, lineNames) {
   popup?.remove();
   const box = document.createElement('div');
   const title = document.createElement('strong');
   title.textContent = name;
   box.append(title);
-  if (lines.length) {
+  if (lineNames.length) {
     const sub = document.createElement('div');
     sub.className = 'popup-lines';
-    sub.textContent = lines.join(' / ');
+    const shown = lineNames.slice(0, 6).join(' / ');
+    sub.textContent = lineNames.length > 6 ? `${shown} ほか${lineNames.length - 6}路線` : shown;
     box.append(sub);
   }
-  popup = new maplibregl.Popup({ offset: 12, closeButton: false, maxWidth: '260px' }).setLngLat(lngLat).setDOMContent(box).addTo(map);
+  popup = new maplibregl.Popup({ offset: 12, closeButton: false, maxWidth: '260px' })
+    .setLngLat(lngLat)
+    .setDOMContent(box)
+    .addTo(map);
+}
+
+function visibleLayers(suffixes) {
+  return CATEGORIES.flatMap(({ key }) => suffixes.map((s) => `${key}-${s}`)).filter(
+    (id) => map.getLayoutProperty(id, 'visibility') !== 'none',
+  );
+}
+
+function around(point, r) {
+  return [
+    [point.x - r, point.y - r],
+    [point.x + r, point.y + r],
+  ];
 }
 
 map.on('click', (e) => {
   popup?.remove();
+
   // 駅の丸印を優先して判定する
-  const sr = 10;
-  const stopLayers = CATEGORIES.flatMap(({ key }) => [`${key}-stop-sel`, `${key}-stop`]).filter(
-    (id) => map.getLayoutProperty(id, 'visibility') !== 'none',
-  );
-  const stopHits = map.queryRenderedFeatures(
-    [
-      [e.point.x - sr, e.point.y - sr],
-      [e.point.x + sr, e.point.y + sr],
-    ],
-    { layers: stopLayers },
-  );
+  const stopHits = map.queryRenderedFeatures(around(e.point, 10), { layers: visibleLayers(['stop-sel', 'stop']) });
   if (stopHits.length) {
     const stop = stopHits[0];
-    const sameStation = stopHits.filter((h) => h.properties.name === stop.properties.name);
-    const sels = [];
-    for (const h of sameStation) {
-      if (!sels.some((x) => x.cat === h.properties.cat && x.gid === h.properties.gid))
-        sels.push({ cat: h.properties.cat, gid: h.properties.gid });
-    }
-    const names = sels.map((x) => findFeature(x.cat, x.gid)?.properties.name).filter(Boolean);
-    showStopPopup(stop.geometry.coordinates, stop.properties.name, names);
-    // 選択中の路線の駅なら選択は維持し、そうでなければその駅を通る路線を選択する
-    if (!selected || !sels.some((x) => x.cat === selected.cat && x.gid === selected.gid)) {
-      const [first, ...others] = sels;
-      select(first, others);
+    const { name, cat } = stop.properties;
+    const coords = stop.geometry.coordinates;
+    const lines = connectedLines(name, coords, cat);
+    showStopPopup(
+      coords,
+      name,
+      lines.map((l) => lineOf(l.cat, l.gid).properties.name),
+    );
+    if (lines.length >= 2) {
+      // ターミナル駅: 接続している路線だけを表示する
+      showStation(name, coords, lines);
+    } else {
+      select({ cat, gid: stop.properties.gid });
     }
     return;
   }
 
-  const r = 8; // タッチでも当てやすいように余裕を持たせる
-  const box = [
-    [e.point.x - r, e.point.y - r],
-    [e.point.x + r, e.point.y + r],
-  ];
-  const hits = map.queryRenderedFeatures(box, { layers: visibleHitLayers() });
+  const hits = map.queryRenderedFeatures(around(e.point, 8), { layers: visibleLayers(['hit']) });
   const uniq = [];
-  const seen = new Set();
   for (const h of hits) {
-    const id = `${h.properties.cat}:${h.properties.gid}`;
-    if (seen.has(id)) continue;
-    seen.add(id);
-    uniq.push({ cat: h.properties.cat, gid: h.properties.gid });
+    const s = { cat: h.properties.cat, gid: h.properties.gid };
+    if (!uniq.some((u) => sameLine(u, s))) uniq.push(s);
   }
   if (uniq.length === 0) return clearSelection();
   // 現在選択中の路線が重なっていたら、次の候補へ切り替えて重なり路線も選べるようにする
   let idx = 0;
   if (selected && uniq.length > 1) {
-    const cur = uniq.findIndex((u) => u.cat === selected.cat && u.gid === selected.gid);
+    const cur = uniq.findIndex((u) => sameLine(u, selected));
     if (cur >= 0) idx = (cur + 1) % uniq.length;
   }
   const [first] = uniq.splice(idx, 1);
@@ -310,30 +441,121 @@ map.on('click', (e) => {
 });
 
 map.on('mousemove', (e) => {
-  const box = [
-    [e.point.x - 4, e.point.y - 4],
-    [e.point.x + 4, e.point.y + 4],
-  ];
-  const over = map.queryRenderedFeatures(box, { layers: [...visibleHitLayers(), ...hitLayerIds.map((id) => id.replace('-hit', '-stop'))] }).length > 0;
+  const over = map.queryRenderedFeatures(around(e.point, 4), { layers: visibleLayers(['hit', 'stop']) }).length > 0;
   map.getCanvas().style.cursor = over ? 'pointer' : '';
 });
 
-document.getElementById('panel-close').addEventListener('click', clearSelection);
+// ---- 路線の検索プルダウン ---------------------------------------------------
+
+let searchItems = [];
+
+function buildSearchItems() {
+  searchItems = CATEGORIES.flatMap(({ key }) => featuresByCat[key].map((f) => ({ cat: key, ...f.properties })))
+    .map((p) => ({
+      cat: p.cat,
+      gid: p.gid,
+      name: p.name,
+      colour: p.colour,
+      text: `${p.name} ${p.operator} ${p.nameEn} ${LABELS[p.cat]}`.toLowerCase(),
+    }))
+    .sort((a, b) => CAT_ORDER[a.cat] - CAT_ORDER[b.cat] || a.name.localeCompare(b.name, 'ja'));
+}
+
+const MAX_ITEMS = 80;
+
+function renderList() {
+  const q = el.search.value.trim().toLowerCase();
+  // 1路線だけ表示中に、その路線名のまま開いたときは全件を出す
+  const filterText = view.mode === 'solo' && el.search.value === lineOf(view.cat, view.gid)?.properties.name ? '' : q;
+  const matches = searchItems.filter((it) => !filterText || it.text.includes(filterText));
+  const nodes = matches.slice(0, MAX_ITEMS).map((it) => {
+    const li = document.createElement('li');
+    li.role = 'option';
+    li.dataset.cat = it.cat;
+    li.dataset.gid = it.gid;
+    li.style.setProperty('--c', it.colour);
+    const name = document.createElement('span');
+    name.textContent = it.name;
+    const kind = document.createElement('small');
+    kind.textContent = LABELS[it.cat];
+    li.append(name, kind);
+    return li;
+  });
+  if (matches.length > MAX_ITEMS) {
+    const more = document.createElement('li');
+    more.className = 'more';
+    more.textContent = `他 ${matches.length - MAX_ITEMS} 件(文字を入力して絞り込み)`;
+    nodes.push(more);
+  } else if (matches.length === 0) {
+    const none = document.createElement('li');
+    none.className = 'more';
+    none.textContent = '該当する路線がありません';
+    nodes.push(none);
+  }
+  el.list.replaceChildren(...nodes);
+}
+
+function openList() {
+  renderList();
+  el.list.hidden = false;
+  el.search.setAttribute('aria-expanded', 'true');
+}
+
+function closeList() {
+  el.list.hidden = true;
+  el.search.setAttribute('aria-expanded', 'false');
+}
+
+function chooseItem(li) {
+  if (!li?.dataset.gid) return;
+  closeList();
+  el.search.blur();
+  showOnly({ cat: li.dataset.cat, gid: Number(li.dataset.gid) });
+}
+
+el.search.addEventListener('focus', () => {
+  el.search.select();
+  openList();
+});
+el.search.addEventListener('input', openList);
+el.search.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') chooseItem(el.list.querySelector('li[data-gid]'));
+  if (e.key === 'Escape') {
+    closeList();
+    el.search.blur();
+    e.stopPropagation();
+  }
+});
+el.list.addEventListener('click', (e) => chooseItem(e.target.closest('li')));
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.search')) closeList();
+});
+
+// ---- その他の UI ------------------------------------------------------------
+
+$('panel-close').addEventListener('click', clearSelection);
+el.btnSolo.addEventListener('click', () => panelState?.sel && showOnly(panelState.sel, { fit: false }));
+el.btnReset.addEventListener('click', resetView);
+el.resetView.addEventListener('click', resetView);
 window.addEventListener('keydown', (e) => e.key === 'Escape' && clearSelection());
 
-document.getElementById('btn-tokyo').addEventListener('click', () => map.flyTo({ ...TOKYO, duration: 1500 }));
-document.getElementById('btn-japan').addEventListener('click', () => map.flyTo({ ...JAPAN, duration: 1500 }));
+$('btn-tokyo').addEventListener('click', () => map.flyTo({ ...TOKYO, duration: 1500 }));
+$('btn-japan').addEventListener('click', () => map.flyTo({ ...JAPAN, duration: 1500 }));
 
 document.querySelectorAll('#controls input[data-cat]').forEach((input) => {
   input.addEventListener('change', () => {
     const key = input.dataset.cat;
-    const vis = input.checked ? 'visible' : 'none';
-    for (const suffix of ['casing', 'line', 'hit', 'glow', 'sel-casing', 'sel-line', 'stop', 'stop-sel']) {
-      map.setLayoutProperty(`${key}-${suffix}`, 'visibility', vis);
-    }
+    catVisible[key] = input.checked;
     if (!input.checked && selected?.cat === key) clearSelection();
+    // 絞り込み中にカテゴリを切り替えたら、絞り込みを解除して通常表示に戻す
+    view = { mode: 'all' };
+    el.search.value = '';
+    if (panelState?.type === 'station') closePanel();
+    applyView();
   });
 });
+
+// ---- データ読み込み ---------------------------------------------------------
 
 map.on('load', async () => {
   const base = import.meta.env.BASE_URL;
@@ -358,12 +580,23 @@ map.on('load', async () => {
     // 駅の丸印は路線の色で縁取る
     const colours = new Map(data.features.map((f) => [f.properties.gid, f.properties.colour]));
     for (const f of stops.features) f.properties.colour = colours.get(f.properties.gid) ?? '#666';
+    allStops.push(
+      ...stops.features.map((f) => ({
+        cat: key,
+        gid: f.properties.gid,
+        key: stationKey(f.properties.name),
+        lon: f.geometry.coordinates[0],
+        lat: f.geometry.coordinates[1],
+      })),
+    );
     map.addSource(key, { type: 'geojson', data });
     map.addSource(`${key}-stops`, { type: 'geojson', data: stops });
   }
   for (const cat of CATEGORIES) addCategoryLayers(cat);
   addHighlightLayers();
   addStopLayers();
+  buildSearchItems();
+  el.search.disabled = false;
 
   const total = Object.values(featuresByCat).reduce((n, fs) => n + fs.length, 0);
   el.status.textContent = `${total} 路線を表示中`;

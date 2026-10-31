@@ -7,7 +7,7 @@
 
 ## 構成
 
-- 地図: [MapLibre GL JS](https://maplibre.org/) + [地理院タイル(淡色地図)](https://maps.gsi.go.jp/development/ichiran.html)
+- 地図: [MapLibre GL JS](https://maplibre.org/) + [OpenStreetMap](https://www.openstreetmap.org/) 標準タイル(彩度を少し落として表示)
 - 路線データ: [OpenStreetMap](https://www.openstreetmap.org/) の路線リレーション(Overpass API で取得)
 - ビルド: Vite / デプロイ: GitHub Actions → GitHub Pages
 
@@ -38,4 +38,4 @@ npm run fetch-data -- --force   # Overpass API から再取得
 ## データの出典
 
 - 路線データ © OpenStreetMap contributors (ODbL)
-- 背景地図: 地理院タイル
+- 背景地図: © OpenStreetMap contributors。標準タイルサーバー(tile.openstreetmap.org)を利用しているため、アクセスが増える場合は[タイル利用ポリシー](https://operations.osmfoundation.org/policies/tiles/)に従い、別のタイル提供元への切り替えを検討してください。
