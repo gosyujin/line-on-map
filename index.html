@@ -51,6 +51,13 @@
 
     <div id="status" role="status">路線データを読み込み中…</div>
 
-    <script type="module" src="/src/main.js"></script>
+    <section id="no-webgl" role="alert" hidden>
+      <h1>地図を表示できません</h1>
+      <p>このブラウザでは WebGL が使えないため、地図を描画できません。</p>
+      <p>Chrome の場合は、設定の「システム」で<strong>「グラフィックアクセラレーションが使用可能な場合は使用する」</strong>をオンにしてブラウザを再起動してください。<code>chrome://gpu</code> で WebGL の状態を確認できます。</p>
+      <p>それでも表示されない場合は、別のブラウザ(Safari・Firefox・Edge など)をお試しください。</p>
+    </section>
+
+    <script type="module" src="/src/boot.js"></script>
   </body>
 </html>
