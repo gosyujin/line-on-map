@@ -247,6 +247,7 @@ function applyView() {
   }
   updateFilterRow();
   renderActions();
+  syncLabels();
 }
 
 // 表示対象のカテゴリが非表示にされていたら表示に戻す
@@ -284,6 +285,85 @@ function resetView() {
   applyView();
   if (panelState?.type === 'station') closePanel();
 }
+
+// ---- 駅名の吹き出し(1路線だけ表示中) ------------------------------------------
+// 日本語のフォントデータを持たないため、MapLibre のシンボルレイヤーではなく
+// 地図の上に重ねた HTML で描画する。重なる吹き出しは、上→下の順に置き直し、置けなければ隠す。
+
+const labelLayer = document.createElement('div');
+labelLayer.id = 'labels';
+map.getContainer().append(labelLayer);
+
+let labels = []; // { el, lon, lat, w, h }
+let labelKey = '';
+let labelRaf = 0;
+
+const MAX_LABEL_CHARS = 6;
+const shortName = (name) => (name.length > MAX_LABEL_CHARS ? `${name.slice(0, MAX_LABEL_CHARS - 1)}…` : name);
+
+function syncLabels() {
+  const key = view.mode === 'solo' ? `${view.cat}:${view.gid}` : '';
+  if (key === labelKey) return;
+  labelKey = key;
+  labelLayer.replaceChildren();
+  labels = [];
+  if (!key) return;
+  const colour = lineOf(view.cat, view.gid)?.properties.colour;
+  const stops = allStops.filter((s) => s.cat === view.cat && s.gid === view.gid);
+  labels = stops.map((s) => {
+    const div = document.createElement('div');
+    div.className = 'stop-label';
+    div.textContent = shortName(s.name);
+    div.style.setProperty('--c', colour);
+    labelLayer.append(div);
+    return { el: div, lon: s.lon, lat: s.lat, w: 0, h: 0 };
+  });
+  // 寸法は描画後でないと測れない
+  for (const l of labels) {
+    l.w = l.el.offsetWidth;
+    l.h = l.el.offsetHeight;
+  }
+  scheduleLabels();
+}
+
+function scheduleLabels() {
+  if (!labels.length || labelRaf) return;
+  labelRaf = requestAnimationFrame(() => {
+    labelRaf = 0;
+    placeLabels();
+  });
+}
+
+function placeLabels() {
+  const { clientWidth: W, clientHeight: H } = labelLayer;
+  const GAP = 11; // 丸印との間隔(しっぽの分)
+  const placed = [];
+  const hit = (r) =>
+    placed.some((p) => r.x < p.x + p.w + 2 && r.x + r.w + 2 > p.x && r.y < p.y + p.h + 2 && r.y + r.h + 2 > p.y);
+  for (const l of labels) {
+    const p = map.project([l.lon, l.lat]);
+    const x = Math.round(p.x - l.w / 2);
+    const above = { x, y: Math.round(p.y - l.h - GAP), w: l.w, h: l.h };
+    const below = { x, y: Math.round(p.y + GAP), w: l.w, h: l.h };
+    const onScreen = (r) => r.x + r.w > 0 && r.x < W && r.y + r.h > 0 && r.y < H;
+    const pick = [
+      [above, false],
+      [below, true],
+    ].find(([r]) => onScreen(r) && !hit(r));
+    if (!pick) {
+      l.el.style.visibility = 'hidden';
+      continue;
+    }
+    const [r, isBelow] = pick;
+    placed.push(r);
+    l.el.classList.toggle('below', isBelow);
+    l.el.style.transform = `translate(${r.x}px, ${r.y}px)`;
+    l.el.style.visibility = 'visible';
+  }
+}
+
+map.on('move', scheduleLabels);
+map.on('resize', scheduleLabels);
 
 // ---- 選択(強調表示)とパネル ------------------------------------------------
 
@@ -624,6 +704,7 @@ map.on('load', async () => {
       ...stops.features.map((f) => ({
         cat: key,
         gid: f.properties.gid,
+        name: f.properties.name,
         key: stationKey(f.properties.name),
         lon: f.geometry.coordinates[0],
         lat: f.geometry.coordinates[1],

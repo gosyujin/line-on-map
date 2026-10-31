@@ -117,7 +117,12 @@ button {
 .search {
   position: relative;
   flex: 1;
-  min-width: 190px;
+  min-width: 0;
+}
+
+/* 下部に置くので、候補リストは上向きに開く。右端は帰属表示ボタンの分を空ける */
+#filter-row {
+  margin-right: 44px;
 }
 
 #line-search {
@@ -135,7 +140,7 @@ button {
 #line-list {
   position: absolute;
   z-index: 3;
-  top: calc(100% + 4px);
+  bottom: calc(100% + 4px);
   left: 0;
   right: 0;
   max-height: min(50vh, 320px);
@@ -197,7 +202,8 @@ button {
 
 /* ---- 下部パネル ------------------------------------------------------------ */
 
-#panel {
+/* パネルと絞り込み欄は画面下にまとめて積む(親指で届く位置) */
+#bottom {
   position: absolute;
   z-index: 2;
   left: 0;
@@ -205,6 +211,18 @@ button {
   bottom: calc(8px + env(safe-area-inset-bottom));
   margin: 0 auto;
   width: min(480px, calc(100% - 16px));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+
+#bottom > * {
+  pointer-events: auto;
+}
+
+#panel {
+  position: relative;
   padding: 8px 34px 8px 12px;
   background: var(--panel-bg);
   border-left: 5px solid var(--accent);
@@ -343,4 +361,53 @@ button {
   font-size: 13px;
   font-weight: 600;
   border-radius: 8px;
+}
+
+/* ---- 駅名の吹き出し(1路線だけ表示中) ------------------------------------------ */
+
+#labels {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.stop-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  color: #222;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1.5px solid var(--c, #666);
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  visibility: hidden;
+}
+
+/* 吹き出しのしっぽ(駅の丸印を指す) */
+.stop-label::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  margin-left: -4px;
+  width: 8px;
+  height: 8px;
+  background: inherit;
+  border: inherit;
+  border-top: 0;
+  border-left: 0;
+  transform: rotate(45deg);
+  bottom: -5px;
+}
+
+.stop-label.below::after {
+  bottom: auto;
+  top: -5px;
+  transform: rotate(225deg);
 }
