@@ -6,7 +6,7 @@
 //
 // データ © OpenStreetMap contributors (ODbL)
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,8 +22,14 @@ const ENDPOINTS = (process.env.OVERPASS_URL ? [process.env.OVERPASS_URL] : []).c
   'https://overpass.openstreetmap.fr/api/interpreter',
 ]);
 
-// 取得対象範囲 (south, west, north, east)
-const BBOX = [35.45, 139.35, 35.85, 139.95];
+// 取得対象エリア。bbox は (south, west, north, east)。
+// データはエリアごとのファイルに分けて出力し、画面では表示範囲に入ったエリアだけを読み込む。
+// 路線・駅は、先に並んだ(bbox に含まれる)エリアへ割り当てる。どれにも含まれなければ中心が最も近いエリア。
+// filter は種別ごとの追加条件。バスは数が多いので東京は都営バスのみに絞る。
+const AREAS = [
+  { id: 'tokyo', name: '東京', bbox: [35.45, 139.35, 35.85, 139.95], filter: { bus: '["operator"~"東京都交通局|都営|Toei"]' } },
+  { id: 'chiba', name: '千葉', bbox: [35.5, 139.9, 35.95, 140.3], filter: {} },
+];
 // 範囲外へ長く伸びる路線(東海道線など)を切り落とすための余白付きクリップ範囲
 const CLIP_MARGIN = 0.05;
 
@@ -42,8 +48,7 @@ const CATEGORIES = {
   },
   bus: {
     label: 'バス',
-    // バスは数が膨大なので、まずは都営バスのみ。範囲を広げる場合は正規表現を変更する。
-    query: `relation["route"="bus"]["operator"~"東京都交通局|都営|Toei"]`,
+    query: `relation["route"="bus"]`,
     defaultColour: '#d9531e',
     groupBy: 'ref',
   },
@@ -77,34 +82,48 @@ async function overpass(query) {
   throw lastErr;
 }
 
+const areaQuery = (key, cat, area) => `${cat.query}${area.filter[key] ?? ''}(${area.bbox.join(',')})`;
+
+// エリアごとに取得してキャッシュし、重複する範囲のリレーションは id でまとめる
 async function loadCategory(key, cat) {
-  const cacheFile = join(CACHE_DIR, `${key}.json`);
-  if (!FORCE && existsSync(cacheFile)) {
-    console.log(`[${key}] using cache`);
-    return JSON.parse(await readFile(cacheFile, 'utf8'));
+  const elements = new Map();
+  for (const area of AREAS) {
+    const cacheFile = join(CACHE_DIR, `${key}-${area.id}.json`);
+    let data;
+    if (!FORCE && existsSync(cacheFile)) {
+      console.log(`[${key}/${area.id}] using cache`);
+      data = JSON.parse(await readFile(cacheFile, 'utf8'));
+    } else {
+      console.log(`[${key}/${area.id}] fetching from Overpass...`);
+      data = await overpass(`${areaQuery(key, cat, area)};out geom;`);
+      await mkdir(CACHE_DIR, { recursive: true });
+      await writeFile(cacheFile, JSON.stringify(data));
+    }
+    for (const e of data.elements) elements.set(e.id, e);
   }
-  console.log(`[${key}] fetching from Overpass...`);
-  const data = await overpass(`${cat.query}(${BBOX.join(',')});out geom;`);
-  await mkdir(CACHE_DIR, { recursive: true });
-  await writeFile(cacheFile, JSON.stringify(data));
-  return data;
+  return { elements: [...elements.values()] };
 }
 
 // 路線リレーションのメンバーノード(駅・停留所)の名前と座標を取得する
 async function loadNodes(key, cat) {
-  const cacheFile = join(CACHE_DIR, `${key}-nodes.json`);
-  if (!FORCE && existsSync(cacheFile)) {
-    console.log(`[${key}] using nodes cache`);
-    return JSON.parse(await readFile(cacheFile, 'utf8'));
-  }
-  console.log(`[${key}] fetching stops from Overpass...`);
-  const data = await overpass(`${cat.query}(${BBOX.join(',')})->.r;node(r.r);out;`);
   const nodes = {};
-  for (const e of data.elements) {
-    const name = e.tags?.['name:ja'] || e.tags?.name;
-    if (e.type === 'node' && name) nodes[e.id] = { name, lat: e.lat, lon: e.lon };
+  for (const area of AREAS) {
+    const cacheFile = join(CACHE_DIR, `${key}-nodes-${area.id}.json`);
+    if (!FORCE && existsSync(cacheFile)) {
+      console.log(`[${key}/${area.id}] using nodes cache`);
+      Object.assign(nodes, JSON.parse(await readFile(cacheFile, 'utf8')));
+      continue;
+    }
+    console.log(`[${key}/${area.id}] fetching stops from Overpass...`);
+    const data = await overpass(`${areaQuery(key, cat, area)}->.r;node(r.r);out;`);
+    const found = {};
+    for (const e of data.elements) {
+      const name = e.tags?.['name:ja'] || e.tags?.name;
+      if (e.type === 'node' && name) found[e.id] = { name, lat: e.lat, lon: e.lon };
+    }
+    await writeFile(cacheFile, JSON.stringify(found));
+    Object.assign(nodes, found);
   }
-  await writeFile(cacheFile, JSON.stringify(nodes));
   return nodes;
 }
 
@@ -130,7 +149,7 @@ const COMPANY_SHORT = {
   相模鉄道: '相鉄',
   東京地下鉄: '東京メトロ',
 };
-const KEY_ALIAS = { JR常磐線快速: 'JR常磐快速線', JR中央線JC: 'JR中央線' };
+const KEY_ALIAS = { JR常磐線快速: 'JR常磐快速線', JR中央線JC: 'JR中央線', 総武本線: 'JR総武本線' };
 
 // "JR京浜東北線・根岸線 各駅停車 (南浦和 → 大船)" → "JR京浜東北線・根岸線"
 // "東京メトロ有楽町線 : 和光市→新木場"            → "東京メトロ有楽町線"
@@ -175,10 +194,17 @@ function isJR(operator) {
 // ---- 幾何処理 -------------------------------------------------------------
 
 function inClip(lon, lat) {
-  const [s, w, n, e] = BBOX;
-  return (
-    lat >= s - CLIP_MARGIN && lat <= n + CLIP_MARGIN && lon >= w - CLIP_MARGIN && lon <= e + CLIP_MARGIN
-  );
+  return AREAS.some(({ bbox: [s, w, n, e] }) => {
+    return lat >= s - CLIP_MARGIN && lat <= n + CLIP_MARGIN && lon >= w - CLIP_MARGIN && lon <= e + CLIP_MARGIN;
+  });
+}
+
+// 路線・駅を割り当てるエリア
+function areaOf(lon, lat) {
+  const inside = AREAS.find(({ bbox: [s, w, n, e] }) => lat >= s && lat <= n && lon >= w && lon <= e);
+  if (inside) return inside.id;
+  const dist = ({ bbox: [s, w, n, e] }) => Math.hypot(lon - (w + e) / 2, lat - (s + n) / 2);
+  return AREAS.reduce((a, b) => (dist(b) < dist(a) ? b : a)).id;
 }
 
 const round = (v) => Math.round(v * 1e5) / 1e5;
@@ -293,7 +319,16 @@ function groupLines(cat, data, nodes) {
     });
 }
 
-// バスは系統番号(ref)でまとめる。ref が無い場合は名称から系統番号を取り出す。
+const TOEI = /東京都交通局|都営|Toei/;
+
+// バスの事業者名: 「京成バス株式会社」→「京成バス」。都営バスは「都営バス」にそろえる。
+function busOperator(tags) {
+  const op = (tags.operator || tags.network || '').split(';')[0];
+  if (TOEI.test(op)) return '都営バス';
+  return op.normalize('NFKC').replace(/株式会社|有限会社|\s/g, '') || 'バス';
+}
+
+// バスは事業者+系統番号(ref)でまとめる。ref が無い場合は名称から系統番号を取り出す。
 function groupBus(cat, data, nodes) {
   const groups = new Map();
   for (const rel of data.elements) {
@@ -302,10 +337,12 @@ function groupBus(cat, data, nodes) {
     const raw = tags['name:ja'] || tags.name || '';
     const ref = (tags.ref || raw.match(/バス(\S+?)系統/)?.[1] || '').replace(/\(.*\)$/, '');
     if (!ref) continue;
-    let g = groups.get(ref);
+    const op = busOperator(tags);
+    const key = `${op}|${ref}`;
+    let g = groups.get(key);
     if (!g) {
       g = {
-        name: `都営バス ${ref}`,
+        name: op === 'バス' ? ref : `${op} ${ref}`, // 事業者が不明なものは系統名だけ
         nameEn: '',
         operators: new Set(),
         colour: tags.colour || '',
@@ -313,11 +350,13 @@ function groupBus(cat, data, nodes) {
         ways: new Map(),
         stops: [],
       };
-      groups.set(ref, g);
+      groups.set(key, g);
     }
     for (const o of (tags.operator || '').split(';')) o && g.operators.add(o);
+    // 都営バスは名称の「…系統 渋谷駅～新橋駅」から経路を取り出す。他は起点→終点があればそれを使う
     const stops = raw.replace(/^.*系統(（[^）]*）)?\s*/, '');
     if (stops && stops !== raw) g.detail.add(stops);
+    else if (tags.from && tags.to) g.detail.add(`${tags.from} → ${tags.to}`);
     collectWays(rel, g);
     collectStops(rel, g, nodes);
   }
@@ -345,43 +384,95 @@ function build(key, cat, data, nodes) {
   const lines = (cat.groupBy === 'ref' ? groupBus(cat, data, nodes) : dropCovered(groupLines(cat, data, nodes))).sort(
     (a, b) => a.name.localeCompare(b.name, 'ja'),
   );
-  const features = lines.map((g, gid) => ({
-      type: 'Feature',
-      properties: {
-        gid,
-        cat: key,
-        name: g.name,
-        nameEn: g.nameEn,
-        operator: g.operators.join(' / '),
-        colour: /^#[0-9a-f]{6}$/i.test(g.colour)
-          ? g.colour
-          : cat.groupBy === 'ref'
-            ? cat.defaultColour
-            : fallbackColour(g.name),
-        detail: g.detail ?? '',
-      },
-      geometry: { type: 'MultiLineString', coordinates: [...g.ways.values()].map((w) => simplify(w)) },
-    }));
-  const stopFeatures = lines.flatMap((g, gid) =>
-    mergeStops(g.stops).map((st) => ({
-      type: 'Feature',
-      properties: { gid, cat: key, name: st.name },
-      geometry: { type: 'Point', coordinates: [round(st.lon), round(st.lat)] },
-    })),
+  // 路線の識別(gid・名前・色)は全エリアを通して決め、ジオメトリだけをエリア別に分ける。
+  // way は中間の頂点が属するエリアへ、駅はその座標が属するエリアへ割り当てる(重複して描かない)。
+  const byArea = Object.fromEntries(
+    AREAS.map((a) => [a.id, { lines: [], stops: [] }]),
   );
-  return {
-    lines: { type: 'FeatureCollection', features },
-    stops: { type: 'FeatureCollection', features: stopFeatures },
-  };
+  const index = [];
+  lines.forEach((g, gid) => {
+    const colour = /^#[0-9a-f]{6}$/i.test(g.colour)
+      ? g.colour
+      : cat.groupBy === 'ref'
+        ? cat.defaultColour
+        : fallbackColour(g.name);
+    const waysByArea = {};
+    const box = [Infinity, Infinity, -Infinity, -Infinity]; // w, s, e, n
+    const extend = ([lon, lat]) => {
+      box[0] = Math.min(box[0], lon);
+      box[1] = Math.min(box[1], lat);
+      box[2] = Math.max(box[2], lon);
+      box[3] = Math.max(box[3], lat);
+    };
+    for (const way of g.ways.values()) {
+      const pts = simplify(way);
+      pts.forEach(extend);
+      const [lon, lat] = pts[Math.floor(pts.length / 2)];
+      (waysByArea[areaOf(lon, lat)] ??= []).push(pts);
+    }
+    const stops = mergeStops(g.stops);
+    for (const st of stops) {
+      const area = areaOf(st.lon, st.lat);
+      byArea[area].stops.push({
+        type: 'Feature',
+        properties: { gid, cat: key, name: st.name, colour },
+        geometry: { type: 'Point', coordinates: [round(st.lon), round(st.lat)] },
+      });
+    }
+    for (const [area, ways] of Object.entries(waysByArea)) {
+      byArea[area].lines.push({
+        type: 'Feature',
+        properties: { gid, cat: key, colour },
+        geometry: { type: 'MultiLineString', coordinates: ways },
+      });
+    }
+    index.push({
+      cat: key,
+      gid,
+      name: g.name,
+      nameEn: g.nameEn,
+      operator: g.operators.join(' / '),
+      colour,
+      detail: g.detail ?? '',
+      bbox: box,
+      areas: Object.keys(waysByArea),
+    });
+  });
+  return { index, byArea };
 }
 
-await mkdir(OUT_DIR, { recursive: true });
+await rm(OUT_DIR, { recursive: true, force: true });
+const index = [];
+const extents = Object.fromEntries(AREAS.map((a) => [a.id, [Infinity, Infinity, -Infinity, -Infinity]]));
 for (const [key, cat] of Object.entries(CATEGORIES)) {
   const raw = await loadCategory(key, cat);
   const nodes = await loadNodes(key, cat);
-  const { lines, stops } = build(key, cat, raw, nodes);
-  const json = JSON.stringify(lines);
-  await writeFile(join(OUT_DIR, `${key}.geojson`), json);
-  await writeFile(join(OUT_DIR, `${key}-stops.geojson`), JSON.stringify(stops));
-  console.log(`[${key}] ${lines.features.length} lines (${(json.length / 1024).toFixed(0)} KB), ${stops.features.length} stops`);
+  const built = build(key, cat, raw, nodes);
+  index.push(...built.index);
+  let summary = '';
+  for (const area of AREAS) {
+    const { lines, stops } = built.byArea[area.id];
+    await mkdir(join(OUT_DIR, area.id), { recursive: true });
+    const json = JSON.stringify({ type: 'FeatureCollection', features: lines });
+    await writeFile(join(OUT_DIR, area.id, `${key}.geojson`), json);
+    await writeFile(
+      join(OUT_DIR, area.id, `${key}-stops.geojson`),
+      JSON.stringify({ type: 'FeatureCollection', features: stops }),
+    );
+    // エリアの実データの範囲(画面でどのエリアを読み込むかの判定に使う)
+    const box = extents[area.id];
+    const grow = ([lon, lat]) => {
+      box[0] = Math.min(box[0], lon);
+      box[1] = Math.min(box[1], lat);
+      box[2] = Math.max(box[2], lon);
+      box[3] = Math.max(box[3], lat);
+    };
+    for (const f of lines) for (const way of f.geometry.coordinates) way.forEach(grow);
+    for (const f of stops) grow(f.geometry.coordinates);
+    summary += ` ${area.id}: ${lines.length} lines (${(json.length / 1024).toFixed(0)} KB), ${stops.length} stops;`;
+  }
+  console.log(`[${key}] ${built.index.length} lines total |${summary}`);
 }
+const areas = AREAS.map(({ id, name }) => ({ id, name, bbox: extents[id] }));
+await writeFile(join(OUT_DIR, 'index.json'), JSON.stringify({ areas, lines: index }));
+console.log(`index.json: ${index.length} lines`);

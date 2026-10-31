@@ -112,8 +112,18 @@ const el = {
 
 // ---- 状態 ------------------------------------------------------------------
 
-const featuresByCat = {}; // 路線データ
-let allStops = []; // 全カテゴリの駅・停留所(接続路線の検索用)
+// 路線の一覧(名前・色・範囲・属するエリア)は index.json から全件を最初に読み込む。
+// 路線・駅のジオメトリはエリア別のファイルで、表示範囲に入ったエリアだけを読み込む。
+const lineIndex = new Map(); // `${cat}:${gid}` → { properties, bbox, areas }
+let areas = []; // { id, name, bbox }
+const loadedAreas = new Map(); // エリア id → 読み込みの Promise
+const dataByCat = Object.fromEntries(
+  CATEGORIES.map(({ key }) => [
+    key,
+    { lines: { type: 'FeatureCollection', features: [] }, stops: { type: 'FeatureCollection', features: [] } },
+  ]),
+);
+let allStops = []; // 読み込み済みエリアの駅・停留所(接続路線の検索用)
 let selected = null; // 強調表示中の路線 { cat, gid }
 // 表示モード: 全路線 / 1路線だけ / 駅に接続する路線だけ
 let view = { mode: 'all' };
@@ -125,7 +135,7 @@ const hitLayerIds = CATEGORIES.map((c) => `${c.key}-hit`);
 const FILTERED = ['casing', 'line', 'hit', 'stop'];
 const ALL_SUFFIXES = [...FILTERED, 'glow', 'sel-casing', 'sel-line', 'stop-sel'];
 
-const lineOf = (cat, gid) => featuresByCat[cat]?.find((f) => f.properties.gid === gid);
+const lineOf = (cat, gid) => lineIndex.get(`${cat}:${gid}`);
 const sameLine = (a, b) => a && b && a.cat === b.cat && a.gid === b.gid;
 
 // ---- レイヤー --------------------------------------------------------------
@@ -258,13 +268,17 @@ function ensureVisible(cats) {
   }
 }
 
-function showOnly(sel, { fit = true } = {}) {
+async function showOnly(sel, { fit = true } = {}) {
+  const f = lineOf(sel.cat, sel.gid);
+  // 検索などで、まだ読み込んでいないエリアの路線が選ばれたときは、先にそのエリアを読み込む
+  if (f && !f.areas.every((id) => loadedAreas.has(id))) {
+    await Promise.all(f.areas.map(loadArea)).catch(showLoadError);
+  }
   ensureVisible([sel.cat]);
   view = { mode: 'solo', ...sel };
   popup?.remove();
   applyView();
   select(sel);
-  const f = lineOf(sel.cat, sel.gid);
   setSearchLabel(f?.properties.name ?? '');
   if (fit && f) fitTo(f);
 }
@@ -449,10 +463,15 @@ function clearSelection() {
   closePanel();
 }
 
-function fitTo(feature) {
-  const b = new maplibregl.LngLatBounds();
-  for (const line of feature.geometry.coordinates) for (const c of line) b.extend(c);
-  map.fitBounds(b, { padding: { top: 60, left: 60, right: 60, bottom: 220 }, maxZoom: 14, duration: 700 });
+function fitTo(line) {
+  const [w, s, e, n] = line.bbox;
+  map.fitBounds(
+    [
+      [w, s],
+      [e, n],
+    ],
+    { padding: { top: 60, left: 60, right: 60, bottom: 220 }, maxZoom: 14, duration: 700 },
+  );
 }
 
 // ---- 駅 ------------------------------------------------------------------
@@ -546,8 +565,8 @@ map.on('mousemove', (e) => {
 let searchItems = [];
 
 function buildSearchItems() {
-  searchItems = CATEGORIES.flatMap(({ key }) => featuresByCat[key].map((f) => ({ cat: key, ...f.properties })))
-    .map((p) => ({
+  searchItems = [...lineIndex.values()]
+    .map(({ properties: p }) => ({
       cat: p.cat,
       gid: p.gid,
       name: p.name,
@@ -677,41 +696,130 @@ document.querySelectorAll('#controls input[data-cat]').forEach((input) => {
 
 // ---- データ読み込み ---------------------------------------------------------
 
-map.on('load', async () => {
-  const base = import.meta.env.BASE_URL;
-  const results = await Promise.all(
-    CATEGORIES.map(async ({ key }) => {
-      const [lines, stops] = await Promise.all(
-        [key, `${key}-stops`].map(async (name) => {
-          const res = await fetch(`${base}data/${name}.geojson`);
-          if (!res.ok) throw new Error(`${name}: HTTP ${res.status}`);
-          return res.json();
-        }),
-      );
-      return [key, lines, stops];
-    }),
-  ).catch((err) => {
-    el.status.textContent = `路線データの読み込みに失敗しました (${err.message})`;
-    throw err;
-  });
+const BASE = import.meta.env.BASE_URL;
+const MIN_LOAD_ZOOM = 8; // これより引いているときは路線を読み込まない
+const LOAD_MARGIN = 0.02; // 度。エリアの端に近づいたら先読みする(エリアの範囲は路線の全頂点を含む)
 
-  for (const [key, data, stops] of results) {
-    featuresByCat[key] = data.features;
-    // 駅の丸印は路線の色で縁取る
-    const colours = new Map(data.features.map((f) => [f.properties.gid, f.properties.colour]));
-    for (const f of stops.features) f.properties.colour = colours.get(f.properties.gid) ?? '#666';
-    allStops.push(
-      ...stops.features.map((f) => ({
-        cat: key,
-        gid: f.properties.gid,
-        name: f.properties.name,
-        key: stationKey(f.properties.name),
-        lon: f.geometry.coordinates[0],
-        lat: f.geometry.coordinates[1],
-      })),
+async function getJSON(path) {
+  const res = await fetch(`${BASE}data/${path}`);
+  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+  return res.json();
+}
+
+// 画面中央上部のステータス表示。読み込み中の件数が 0 になったら消す。
+let pendingLoads = 0;
+let hint = '';
+let statusTimer = 0;
+
+function setStatus(text, autoHideMs = 0) {
+  clearTimeout(statusTimer);
+  el.status.textContent = text;
+  el.status.hidden = false;
+  if (autoHideMs) statusTimer = setTimeout(() => (el.status.hidden = true), autoHideMs);
+}
+
+function setHint(text) {
+  if (text === hint) return;
+  hint = text;
+  if (pendingLoads > 0) return;
+  if (text) setStatus(text);
+  else el.status.hidden = true;
+}
+
+function showLoadError(err) {
+  console.error(err);
+  setStatus(`路線データの読み込みに失敗しました (${err.message})`, 6000);
+}
+
+// エリア内の路線・駅を読み込み、地図のソースに追加する(読み込み済みなら何もしない)
+function loadArea(id) {
+  let p = loadedAreas.get(id);
+  if (!p) {
+    p = fetchArea(id).catch((err) => {
+      loadedAreas.delete(id); // 次の移動で再試行できるようにする
+      throw err;
+    });
+    loadedAreas.set(id, p);
+  }
+  return p;
+}
+
+async function fetchArea(id) {
+  const name = areas.find((a) => a.id === id)?.name ?? id;
+  pendingLoads++;
+  setStatus(`${name}エリアの路線を読み込み中…`);
+  try {
+    const results = await Promise.all(
+      CATEGORIES.map(async ({ key }) => {
+        const [lines, stops] = await Promise.all([getJSON(`${id}/${key}.geojson`), getJSON(`${id}/${key}-stops.geojson`)]);
+        return [key, lines, stops];
+      }),
     );
-    map.addSource(key, { type: 'geojson', data });
-    map.addSource(`${key}-stops`, { type: 'geojson', data: stops });
+    for (const [key, lines, stops] of results) {
+      dataByCat[key].lines.features.push(...lines.features);
+      dataByCat[key].stops.features.push(...stops.features);
+      allStops.push(
+        ...stops.features.map((f) => ({
+          cat: key,
+          gid: f.properties.gid,
+          name: f.properties.name,
+          key: stationKey(f.properties.name),
+          lon: f.geometry.coordinates[0],
+          lat: f.geometry.coordinates[1],
+        })),
+      );
+      map.getSource(key).setData(dataByCat[key].lines);
+      map.getSource(`${key}-stops`).setData(dataByCat[key].stops);
+    }
+    // 1路線だけ表示中なら、増えた駅の吹き出しを作り直す
+    labelKey = '';
+    syncLabels();
+  } finally {
+    pendingLoads--;
+    if (pendingLoads === 0) {
+      if (hint) setStatus(hint);
+      else setStatus(`${name}エリアを読み込みました`, 1200);
+    }
+  }
+}
+
+// 表示範囲に入った(または近い)エリアを読み込む
+function updateAreas() {
+  if (!areas.length) return;
+  if (map.getZoom() < MIN_LOAD_ZOOM) {
+    setHint(loadedAreas.size ? '' : '拡大すると路線が表示されます');
+    return;
+  }
+  const b = map.getBounds();
+  const near = areas.filter(({ bbox: [w, s, e, n] }) => {
+    const m = LOAD_MARGIN;
+    return !(b.getEast() < w - m || b.getWest() > e + m || b.getNorth() < s - m || b.getSouth() > n + m);
+  });
+  for (const a of near) loadArea(a.id).catch(showLoadError);
+  const names = areas.map((a) => a.name).join('・');
+  setHint(near.length ? '' : `この付近の路線データはありません(対応エリア: ${names})`);
+}
+
+map.on('moveend', updateAreas);
+
+map.on('load', async () => {
+  let data;
+  try {
+    data = await getJSON('index.json');
+  } catch (err) {
+    showLoadError(err);
+    return;
+  }
+  areas = data.areas;
+  for (const l of data.lines) {
+    const { bbox, areas: lineAreas, ...properties } = l;
+    lineIndex.set(`${l.cat}:${l.gid}`, { properties, bbox, areas: lineAreas });
+  }
+
+  // ソースとレイヤーは空のまま先に作り、エリアを読み込むたびにデータを足す
+  for (const { key } of CATEGORIES) {
+    map.addSource(key, { type: 'geojson', data: dataByCat[key].lines });
+    map.addSource(`${key}-stops`, { type: 'geojson', data: dataByCat[key].stops });
   }
   for (const cat of CATEGORIES) addCategoryLayers(cat);
   addHighlightLayers();
@@ -719,11 +827,8 @@ map.on('load', async () => {
   buildSearchItems();
   el.search.disabled = false;
 
-  const total = Object.values(featuresByCat).reduce((n, fs) => n + fs.length, 0);
-  el.status.textContent = `${total} 路線を表示中`;
-  setTimeout(() => (el.status.hidden = true), 2500);
-
-  // 日本全体 → 東京近郊へズームイン
+  // 日本全体 → 東京近郊へズームイン。東京は先に読み込んでおく
+  loadArea(areas[0].id).catch(showLoadError);
   map.flyTo({ ...TOKYO, duration: 2500 });
 });
 
