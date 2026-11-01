@@ -25,9 +25,9 @@ const ENDPOINTS = (process.env.OVERPASS_URL ? [process.env.OVERPASS_URL] : []).c
 // 取得対象エリア。bbox は (south, west, north, east)。
 // データはエリアごとのファイルに分けて出力し、画面では表示範囲に入ったエリアだけを読み込む。
 // 路線・駅は、先に並んだ(bbox に含まれる)エリアへ割り当てる。どれにも含まれなければ中心が最も近いエリア。
-// filter は種別ごとの追加条件。バスは数が多いので東京は都営バスのみに絞る。
+// filter は種別ごとの追加条件(種別ごとに Overpass のクエリへ足す)。現在はどのエリアも絞り込まない。
 const AREAS = [
-  { id: 'tokyo', name: '東京', bbox: [35.45, 139.35, 35.85, 139.95], filter: { bus: '["operator"~"東京都交通局|都営|Toei"]' } },
+  { id: 'tokyo', name: '東京', bbox: [35.45, 139.35, 35.85, 139.95], filter: {} },
   // 東端は成田空港(東経140.39°)まで含める
   { id: 'chiba', name: '千葉', bbox: [35.5, 139.9, 35.95, 140.5], filter: {} },
 ];
@@ -352,21 +352,35 @@ function busOperator(tags) {
   return op.normalize('NFKC').replace(/株式会社|有限会社|\s/g, '') || 'バス';
 }
 
-// バスは事業者+系統番号(ref)でまとめる。ref が無い場合は名称から系統番号を取り出す。
+const ARROW = /\s*(?:⇒|→|⇔|⇄|=>|->)\s*/;
+
+// 系統番号が無いバス(空港リムジンなど)は、「リムジンバス 新百合ヶ丘駅⇒羽田空港」のような名称から
+// 行き先の組を取り出し、上り・下りを1つの系統にまとめる。取り出せなければ名称をそのまま系統名にする。
+function namedRoute(raw) {
+  const [from, to, ...rest] = raw.split(ARROW);
+  if (!to || rest.length) return { id: raw, label: raw };
+  const m = from.match(/^(.*\S)\s+(\S+)$/);
+  const [prefix, start] = m ? [m[1], m[2]] : ['', from];
+  return { id: `${prefix} ${[start, to].sort()}`, label: `${prefix} ${start}～${to}`.trim() };
+}
+
+// バスは事業者+系統番号(ref)でまとめる。ref が無い場合は名称から系統番号を取り出し、それも無ければ名称でまとめる。
 function groupBus(cat, data, nodes) {
   const groups = new Map();
   for (const rel of data.elements) {
     if (rel.type !== 'relation') continue;
     const tags = rel.tags ?? {};
     const raw = tags['name:ja'] || tags.name || '';
-    const ref = (tags.ref || raw.match(/バス(\S+?)系統/)?.[1] || '').replace(/\(.*\)$/, '');
+    const number = (tags.ref || raw.match(/バス(\S+?)系統/)?.[1] || '').replace(/\(.*\)$/, '');
+    const ref = number ? { id: number, label: number } : raw ? namedRoute(raw) : null;
     if (!ref) continue;
     const op = busOperator(tags);
-    const key = `${op}|${ref}`;
+    const key = `${op}|${ref.id}`;
     let g = groups.get(key);
     if (!g) {
       g = {
-        name: op === 'バス' ? ref : `${op} ${ref}`, // 事業者が不明なものは系統名だけ
+        // 事業者が不明なもの、名称に事業者名が入っているものは系統名だけ
+        name: op === 'バス' || ref.label.startsWith(op) ? ref.label : `${op} ${ref.label}`,
         nameEn: '',
         operators: new Set(),
         colour: tags.colour || '',

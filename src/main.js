@@ -1,7 +1,7 @@
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
-import { buildGraph, findRoutes, routeSteps, suggestStations } from './route.js';
+import { buildGraph, findRoutes, routeSteps, stationIds, suggestStations } from './route.js';
 
 const CATEGORIES = [
   // 描画順(下 → 上)
@@ -837,7 +837,7 @@ function chooseStation(which, name) {
 // 入力欄の文字(「新宿駅」など)を、駅データにある駅名に直す。なければ空
 function resolveStation(value) {
   const key = stationKey(value.trim());
-  return key && route.graph?.clustersByKey.has(key) ? key : '';
+  return key && route.graph && stationIds(route.graph, key).length ? key : '';
 }
 
 function runRouteSearch() {

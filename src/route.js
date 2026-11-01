@@ -82,7 +82,23 @@ export function buildGraph(stops) {
     clustersByKey.get(c.key).push(c.id);
   }
 
-  return { clusters, lineStops, clustersByKey, walk: buildWalkLinks(clusters), adjacencyCache: new Map() };
+  // 空港は、ターミナルごとに駅名・バス停名が違う(羽田空港第2ターミナル・羽田空港国際線ターミナル…)ので、
+  // 「羽田空港」のように「空港」までの名前で、全ターミナルをまとめて指定できるようにする
+  const groups = new Map();
+  for (const key of clustersByKey.keys()) {
+    const i = key.indexOf('空港');
+    if (i < 2) continue;
+    const name = key.slice(0, i + 2);
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(key);
+  }
+
+  return { clusters, lineStops, clustersByKey, groups, walk: buildWalkLinks(clusters), adjacencyCache: new Map() };
+}
+
+/** 駅名(または空港のまとまりの名前)に当たる駅の cluster id。なければ空 */
+export function stationIds(graph, name) {
+  return (graph.groups.get(name) ?? [name]).flatMap((k) => graph.clustersByKey.get(k) ?? []);
 }
 
 // 駅の外を歩いて乗り換えられる駅の組(別名の駅)。電車・地下鉄の駅だけを対象にする。
@@ -211,8 +227,8 @@ function plan(graph, seq, fromCost, toCost, walk) {
  *          from / to は graph.clusters の id。
  */
 export function findRoutes(graph, { from, to, cats, walk }) {
-  const fromIds = graph.clustersByKey.get(from) ?? [];
-  const toIds = graph.clustersByKey.get(to) ?? [];
+  const fromIds = stationIds(graph, from);
+  const toIds = stationIds(graph, to);
   if (!fromIds.length || !toIds.length || from === to) return [];
 
   // 歩ける乗り換えを許すときは、出発・到着の駅の外(川崎 → 京急川崎)から乗り降りしてもよい
@@ -315,11 +331,17 @@ export function findRoutes(graph, { from, to, cats, walk }) {
 export function suggestStations(graph, query, cats, limit = 40) {
   const q = query.trim().replace(/\s/g, '').toLowerCase();
   const found = new Map(); // 駅名 → 通る路線の数
+  const count = (c) => [...c.lines].filter((l) => cats.has(catOf(l))).length;
   for (const c of graph.clusters) {
     if (q && !c.key.toLowerCase().includes(q)) continue;
-    let n = 0;
-    for (const l of c.lines) if (cats.has(catOf(l))) n++;
+    const n = count(c);
     if (n) found.set(c.key, (found.get(c.key) ?? 0) + n);
+  }
+  // 空港のまとまり(羽田空港)も候補に出す。実在の駅名と同じ名前のときは、そちらを置き換える
+  for (const name of graph.groups.keys()) {
+    if (q && !name.toLowerCase().includes(q)) continue;
+    const n = stationIds(graph, name).reduce((sum, id) => sum + count(graph.clusters[id]), 0);
+    if (n) found.set(name, n);
   }
   const names = [...found.keys()].sort((a, b) => {
     const rank = (name) => (name.toLowerCase() === q ? -1 : q && name.toLowerCase().startsWith(q) ? 0 : 1);
@@ -341,14 +363,14 @@ export function routeSteps(graph, route, fromKey, toKey) {
     keyIds.includes(id) ? id : keyIds.find((k) => graph.walk.get(k)?.includes(id)) ?? id;
   const { legs } = route;
   const steps = [];
-  const start = nearTo(legs[0].from, graph.clustersByKey.get(fromKey));
+  const start = nearTo(legs[0].from, stationIds(graph, fromKey));
   if (start !== legs[0].from) steps.push({ type: 'walk', from: start, to: legs[0].from });
   legs.forEach((leg, i) => {
     if (i > 0 && legs[i - 1].to !== leg.from) steps.push({ type: 'walk', from: legs[i - 1].to, to: leg.from });
     steps.push({ type: 'ride', ...leg });
   });
   const last = legs[legs.length - 1].to;
-  const end = nearTo(last, graph.clustersByKey.get(toKey));
+  const end = nearTo(last, stationIds(graph, toKey));
   if (end !== last) steps.push({ type: 'walk', from: last, to: end });
   return steps;
 }
