@@ -48,16 +48,14 @@ const map = new maplibregl.Map({
 // タッチ端末はピンチで拡大縮小できるので、ズームボタンは出さず地図の領域を空ける
 const isTouch = window.matchMedia('(pointer: coarse)').matches;
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: false, showZoom: !isTouch }), 'top-right');
-map.addControl(
-  new maplibregl.GeolocateControl({
-    positionOptions: { enableHighAccuracy: true },
-    trackUserLocation: true,
-    showUserLocation: true,
-    showAccuracyCircle: true,
-    fitBoundsOptions: { maxZoom: 15 },
-  }),
-  'top-right',
-);
+const geolocate = new maplibregl.GeolocateControl({
+  positionOptions: { enableHighAccuracy: true },
+  trackUserLocation: true,
+  showUserLocation: true,
+  showAccuracyCircle: true,
+  fitBoundsOptions: { maxZoom: 15 },
+});
+map.addControl(geolocate, 'top-right');
 // 「東京」「日本全体」へ移動するアイコンボタン
 class JumpControl {
   onAdd(m) {
@@ -842,7 +840,34 @@ map.on('load', async () => {
   // 日本全体 → 東京近郊へズームイン。東京は先に読み込んでおく
   loadArea(areas[0].id).catch(showLoadError);
   map.flyTo({ ...TOKYO, duration: 2500 });
+  autoLocate();
 });
+
+// ---- 現在地の自動表示 --------------------------------------------------------
+
+const inCoverage = (lon, lat) =>
+  areas.some(({ bbox: [w, s, e, n] }) => lon >= w - 0.05 && lon <= e + 0.05 && lat >= s - 0.05 && lat <= n + 0.05);
+
+// 起動時に現在地を表示する。
+// - 拒否済みの端末では何もしない(許可ダイアログを繰り返し出さない)
+// - 対応エリアの外にいるときは地図を動かさない(現在地ボタンでいつでも出せる)
+async function autoLocate() {
+  if (!('geolocation' in navigator)) return;
+  try {
+    const perm = await navigator.permissions?.query({ name: 'geolocation' });
+    if (perm?.state === 'denied') return;
+  } catch {
+    // Permissions API に対応していないブラウザは、そのままブラウザ側の確認に任せる
+  }
+  navigator.geolocation.getCurrentPosition(
+    ({ coords }) => {
+      if (inCoverage(coords.longitude, coords.latitude)) geolocate.trigger();
+    },
+    () => {}, // 拒否・取得失敗は黙って無視する
+    { enableHighAccuracy: false, timeout: 10_000, maximumAge: 60_000 },
+  );
+}
 
 // 動作確認・デバッグ用
 window.__map = map;
+window.__autoLocate = autoLocate;
