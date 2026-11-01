@@ -49,13 +49,19 @@ const map = new maplibregl.Map({
 const isTouch = window.matchMedia('(pointer: coarse)').matches;
 map.addControl(new maplibregl.NavigationControl({ visualizePitch: false, showZoom: !isTouch }), 'top-right');
 const geolocate = new maplibregl.GeolocateControl({
-  positionOptions: { enableHighAccuracy: true },
+  // PC には GPS がなく、高精度指定だと取得に失敗・遅延しやすいのでタッチ端末だけにする
+  positionOptions: { enableHighAccuracy: isTouch, timeout: 15_000, maximumAge: 60_000 },
   trackUserLocation: true,
   showUserLocation: true,
   showAccuracyCircle: true,
   fitBoundsOptions: { maxZoom: 15 },
 });
 map.addControl(geolocate, 'top-right');
+geolocate.on('error', (e) => {
+  const reasons = { 1: '位置情報の利用が許可されていません', 2: '現在地を特定できませんでした', 3: '現在地の取得がタイムアウトしました' };
+  console.warn('geolocation error', e.code, e.message);
+  setStatus(reasons[e.code] ?? `現在地を取得できませんでした (${e.message})`, 6000);
+});
 // 「東京」「日本全体」へ移動するアイコンボタン
 class JumpControl {
   onAdd(m) {
