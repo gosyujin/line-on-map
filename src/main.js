@@ -298,7 +298,7 @@ function resetView() {
   if (panelState?.type === 'station') closePanel();
 }
 
-// ---- 駅名の吹き出し(1路線だけ表示中) ------------------------------------------
+// ---- 駅名の吹き出し(路線の選択中・1路線だけ表示中) ------------------------------------------
 // 日本語のフォントデータを持たないため、MapLibre のシンボルレイヤーではなく
 // 地図の上に重ねた HTML で描画する。重なる吹き出しは、上→下の順に置き直し、置けなければ隠す。
 
@@ -314,14 +314,16 @@ const MAX_LABEL_CHARS = 6;
 const shortName = (name) => (name.length > MAX_LABEL_CHARS ? `${name.slice(0, MAX_LABEL_CHARS - 1)}…` : name);
 
 function syncLabels() {
-  const key = view.mode === 'solo' ? `${view.cat}:${view.gid}` : '';
+  // 選択中の路線の駅に吹き出しを出す。1路線だけ表示中は、選択を外しても出し続ける
+  const target = selected ?? (view.mode === 'solo' ? view : null);
+  const key = target ? `${target.cat}:${target.gid}` : '';
   if (key === labelKey) return;
   labelKey = key;
   labelLayer.replaceChildren();
   labels = [];
   if (!key) return;
-  const colour = lineOf(view.cat, view.gid)?.properties.colour;
-  const stops = allStops.filter((s) => s.cat === view.cat && s.gid === view.gid);
+  const colour = lineOf(target.cat, target.gid)?.properties.colour;
+  const stops = allStops.filter((s) => s.cat === target.cat && s.gid === target.gid);
   labels = stops.map((s) => {
     const div = document.createElement('div');
     div.className = 'stop-label';
@@ -391,6 +393,7 @@ function setSelection(sel) {
     map.setPaintProperty(`${key}-stop`, 'circle-opacity', sel ? 0.4 : 1);
     map.setPaintProperty(`${key}-stop`, 'circle-stroke-opacity', sel ? 0.4 : 1);
   }
+  syncLabels();
 }
 
 function chip(sel, onClick) {
@@ -781,7 +784,7 @@ async function fetchArea(id) {
       map.getSource(key).setData(dataByCat[key].lines);
       map.getSource(`${key}-stops`).setData(dataByCat[key].stops);
     }
-    // 1路線だけ表示中なら、増えた駅の吹き出しを作り直す
+    // 路線の選択中・1路線だけ表示中なら、増えた駅の吹き出しを作り直す
     labelKey = '';
     syncLabels();
   } finally {
