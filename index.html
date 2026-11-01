@@ -22,6 +22,9 @@
         <button type="button" id="btn-search" class="round" aria-label="路線を検索" title="路線を検索して1本だけ表示">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M15.5 15.5 21 21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
         </button>
+        <button type="button" id="btn-route" class="round" aria-label="ルートを探す" title="出発駅から到着駅までのルートを探す" aria-pressed="false" disabled>
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="6" cy="18" r="2.6" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="18" cy="6" r="2.6" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M8.600 18H14a3.500 3.500 0 0 0 0-7h-4a3.500 3.500 0 0 1 0-7h5.400" fill="none" stroke="currentColor" stroke-width="2.200" stroke-linecap="round"/></svg>
+        </button>
         <label class="pill" title="電車"><input type="checkbox" data-cat="train" checked /><i class="dot" style="--c:#00a040"></i>電車</label>
         <label class="pill" title="地下鉄"><input type="checkbox" data-cat="subway" checked /><i class="dot" style="--c:#0072bc"></i>地下鉄</label>
         <label class="pill" title="バス(都営)"><input type="checkbox" data-cat="bus" checked /><i class="dot" style="--c:#d9531e"></i>バス</label>
@@ -44,6 +47,31 @@
           <span id="panel-others-label">この地点を通る他の路線</span>
           <div id="panel-others-list"></div>
         </div>
+      </section>
+      <section id="route-panel" hidden aria-label="ルート検索">
+        <div class="route-head">
+          <h2>ルートを探す</h2>
+          <button type="button" id="route-close" aria-label="ルート検索を閉じる">×</button>
+        </div>
+        <div class="route-fields">
+          <div class="route-field">
+            <input id="route-from" type="search" placeholder="出発駅" aria-label="出発駅" autocomplete="off" disabled />
+            <ul id="route-from-list" class="suggest" role="listbox" hidden></ul>
+          </div>
+          <button type="button" id="route-swap" class="round small" aria-label="出発と到着を入れ替え" title="出発と到着を入れ替え">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M8 4v16M8 4 4 8M8 4l4 4M16 20V4M16 20l-4-4M16 20l4-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="route-field">
+            <input id="route-to" type="search" placeholder="到着駅" aria-label="到着駅" autocomplete="off" disabled />
+            <ul id="route-to-list" class="suggest" role="listbox" hidden></ul>
+          </div>
+        </div>
+        <div class="route-opts">
+          <label title="バス停も乗り換え・移動に使います"><input type="checkbox" id="route-bus" />バスも使う</label>
+          <label title="川崎 → 京急川崎 のように、別の駅名の駅へ歩いて乗り換えます"><input type="checkbox" id="route-walk" />駅の外を歩く乗り換えも許す</label>
+        </div>
+        <p id="route-msg"></p>
+        <ol id="route-results"></ol>
       </section>
       <div id="filter-row" hidden>
         <div class="search">

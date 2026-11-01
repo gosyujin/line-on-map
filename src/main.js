@@ -1,6 +1,7 @@
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
+import { buildGraph, findRoutes, routeSteps, suggestStations } from './route.js';
 
 const CATEGORIES = [
   // 描画順(下 → 上)
@@ -112,6 +113,16 @@ const el = {
   resetView: $('btn-reset-view'),
   filterRow: $('filter-row'),
   btnSearch: $('btn-search'),
+  btnRoute: $('btn-route'),
+  routePanel: $('route-panel'),
+  routeFrom: $('route-from'),
+  routeTo: $('route-to'),
+  routeFromList: $('route-from-list'),
+  routeToList: $('route-to-list'),
+  routeBus: $('route-bus'),
+  routeWalk: $('route-walk'),
+  routeMsg: $('route-msg'),
+  routeResults: $('route-results'),
 };
 
 // ---- 状態 ------------------------------------------------------------------
@@ -129,7 +140,7 @@ const dataByCat = Object.fromEntries(
 );
 let allStops = []; // 読み込み済みエリアの駅・停留所(接続路線の検索用)
 let selected = null; // 強調表示中の路線 { cat, gid }
-// 表示モード: 全路線 / 1路線だけ / 駅に接続する路線だけ
+// 表示モード: 全路線 / 1路線だけ / 駅に接続する路線だけ / ルート検索の結果の路線だけ
 let view = { mode: 'all' };
 const catVisible = Object.fromEntries(CATEGORIES.map((c) => [c.key, true]));
 
@@ -273,7 +284,7 @@ function addStopLayers() {
 
 function allowedGids(cat) {
   if (view.mode === 'solo') return view.cat === cat ? [view.gid] : [];
-  if (view.mode === 'station') return view.lines.filter((l) => l.cat === cat).map((l) => l.gid);
+  if (view.mode === 'station' || view.mode === 'route') return view.lines.filter((l) => l.cat === cat).map((l) => l.gid);
   return null; // 制限なし
 }
 
@@ -287,6 +298,7 @@ function applyView() {
     }
     for (const suffix of FILTERED) map.setFilter(`${key}-${suffix}`, filter);
   }
+  if (view.mode !== 'route') clearRouteMarks();
   updateFilterRow();
   renderActions();
   syncLabels();
@@ -625,7 +637,8 @@ function setSearchLabel(text) {
 
 // 検索欄は、検索アイコンで開いているか、絞り込み中のときだけ表示する
 function updateFilterRow() {
-  el.filterRow.hidden = !(searchOpen || view.mode !== 'all');
+  // ルート検索中は、ルート検索のパネルが絞り込み中の表示を兼ねる
+  el.filterRow.hidden = !(searchOpen || (view.mode !== 'all' && view.mode !== 'route'));
   el.resetView.hidden = view.mode === 'all';
   el.btnSearch.setAttribute('aria-pressed', String(!el.filterRow.hidden));
 }
@@ -708,6 +721,299 @@ el.search.addEventListener('keydown', (e) => {
 el.list.addEventListener('click', (e) => chooseItem(e.target.closest('li')));
 document.addEventListener('click', (e) => {
   if (!e.target.closest('.search') && !e.target.closest('#btn-search')) closeList();
+});
+
+// ---- ルート検索(出発駅 → 到着駅) ------------------------------------------------
+// 路線の駅データから、乗り換えの少ない経路を探す(src/route.js)。経路を選ぶと、使う路線だけを表示し、
+// 出発・到着・乗り換えの駅に名前を出す。
+
+const route = { graph: null, graphStops: -1, results: [], from: '', to: '' };
+const routeFields = {
+  from: { input: el.routeFrom, list: el.routeFromList },
+  to: { input: el.routeTo, list: el.routeToList },
+};
+let routeMarkers = [];
+const EMPTY_FC = { type: 'FeatureCollection', features: [] };
+
+// 歩く区間(駅の外の乗り換え)を破線で描く
+function addRouteLayers() {
+  map.addSource('route-walk', { type: 'geojson', data: EMPTY_FC });
+  map.addLayer({
+    id: 'route-walk',
+    type: 'line',
+    source: 'route-walk',
+    layout: { 'line-cap': 'butt' },
+    paint: { 'line-color': '#222', 'line-width': 3, 'line-dasharray': [1.5, 1.5] },
+  });
+}
+
+function clearRouteMarks() {
+  for (const m of routeMarkers) m.remove();
+  routeMarkers = [];
+  map.getSource('route-walk')?.setData(EMPTY_FC);
+  for (const li of el.routeResults.children) li.removeAttribute('aria-current');
+}
+
+const routeCats = () => new Set(['train', 'subway', ...(el.routeBus.checked ? ['bus'] : [])]);
+
+// 経路探索には全エリアの駅が要るので、開いたときにまとめて読み込む
+async function ensureRouteGraph() {
+  try {
+    await Promise.all(areas.map((a) => loadArea(a.id)));
+  } catch (err) {
+    showLoadError(err);
+    return null;
+  }
+  if (route.graphStops !== allStops.length) {
+    route.graph = buildGraph(allStops);
+    route.graphStops = allStops.length;
+  }
+  return route.graph;
+}
+
+async function openRoutePanel() {
+  el.routePanel.hidden = false;
+  el.btnRoute.setAttribute('aria-pressed', 'true');
+  searchOpen = false;
+  closeList();
+  updateFilterRow();
+  el.routeMsg.textContent = '路線データを読み込み中…';
+  const graph = await ensureRouteGraph();
+  if (el.routePanel.hidden) return;
+  if (!graph) {
+    el.routeMsg.textContent = '路線データを読み込めませんでした';
+    return;
+  }
+  el.routeMsg.textContent = '';
+  el.routeFrom.disabled = false;
+  el.routeTo.disabled = false;
+  (el.routeFrom.value ? el.routeTo : el.routeFrom).focus();
+  runRouteSearch();
+}
+
+function closeRoutePanel() {
+  el.routePanel.hidden = true;
+  el.btnRoute.setAttribute('aria-pressed', 'false');
+  hideSuggest();
+  if (view.mode === 'route') resetView();
+}
+
+function hideSuggest() {
+  for (const { list } of Object.values(routeFields)) list.hidden = true;
+}
+
+// 入力途中の文字列から駅名の候補を出す
+function showSuggest(which) {
+  if (!route.graph) return;
+  const { input, list } = routeFields[which];
+  const { names, total } = suggestStations(route.graph, input.value, routeCats());
+  const nodes = names.map((name) => {
+    const li = document.createElement('li');
+    li.role = 'option';
+    li.dataset.name = name;
+    li.textContent = name;
+    return li;
+  });
+  if (total > names.length || !names.length) {
+    const note = document.createElement('li');
+    note.className = 'more';
+    note.textContent = names.length ? `他 ${total - names.length} 件(文字を入力して絞り込み)` : '該当する駅がありません';
+    nodes.push(note);
+  }
+  list.replaceChildren(...nodes);
+  list.hidden = false;
+}
+
+function chooseStation(which, name) {
+  if (!name) return;
+  const { input, list } = routeFields[which];
+  input.value = name;
+  list.hidden = true;
+  if (which === 'from' && !el.routeTo.value) el.routeTo.focus();
+  else input.blur();
+  runRouteSearch();
+}
+
+// 入力欄の文字(「新宿駅」など)を、駅データにある駅名に直す。なければ空
+function resolveStation(value) {
+  const key = stationKey(value.trim());
+  return key && route.graph?.clustersByKey.has(key) ? key : '';
+}
+
+function runRouteSearch() {
+  route.results = [];
+  el.routeResults.replaceChildren();
+  if (view.mode === 'route') resetView();
+  if (!route.graph) return;
+  if (!el.routeFrom.value.trim() || !el.routeTo.value.trim()) {
+    el.routeMsg.textContent = '';
+    return;
+  }
+  const from = resolveStation(el.routeFrom.value);
+  const to = resolveStation(el.routeTo.value);
+  if (!from || !to) {
+    el.routeMsg.textContent = '候補から駅を選んでください';
+    return;
+  }
+  if (from === to) {
+    el.routeMsg.textContent = '出発駅と到着駅が同じです';
+    return;
+  }
+  Object.assign(route, { from, to });
+  route.results = findRoutes(route.graph, { from, to, cats: routeCats(), walk: el.routeWalk.checked });
+  if (!route.results.length) {
+    el.routeMsg.textContent = `${from} から ${to} へ行ける経路が見つかりませんでした`;
+    return;
+  }
+  el.routeMsg.textContent = `${route.results.length} 件の経路(乗り換えの少ない順)`;
+  renderRouteResults();
+  showRoute(0);
+}
+
+function renderRouteResults() {
+  const g = route.graph;
+  el.routeResults.replaceChildren(
+    ...route.results.map((r, i) => {
+      const steps = routeSteps(g, r, route.from, route.to);
+      const rides = steps.filter((s) => s.type === 'ride').length;
+      const walked = steps.some((s) => s.type === 'walk');
+      const li = document.createElement('li');
+      li.dataset.idx = i;
+
+      const head = document.createElement('div');
+      head.className = 'r-head';
+      const title = document.createElement('span');
+      title.textContent = !rides ? '徒歩のみ' : rides === 1 ? '乗り換えなし' : `乗り換え ${rides - 1} 回`;
+      head.append(title);
+      if (walked && rides) {
+        const note = document.createElement('small');
+        note.textContent = '徒歩あり';
+        head.append(note);
+      }
+      li.append(head);
+
+      for (const step of steps) {
+        const row = document.createElement('div');
+        row.className = `r-step ${step.type}`;
+        const name = document.createElement('span');
+        name.className = 'r-line';
+        if (step.type === 'ride') {
+          const sel = lineSel(step.line);
+          name.textContent = lineOf(sel.cat, sel.gid)?.properties.name ?? '';
+          row.style.setProperty('--c', lineOf(sel.cat, sel.gid)?.properties.colour);
+        } else {
+          name.textContent = '徒歩';
+        }
+        const span = document.createElement('span');
+        span.textContent = `${g.clusters[step.from].key} → ${g.clusters[step.to].key}`;
+        row.append(name, span);
+        li.append(row);
+      }
+      return li;
+    }),
+  );
+}
+
+const lineSel = (lineKey) => {
+  const [cat, gid] = lineKey.split(':');
+  return { cat, gid: Number(gid) };
+};
+
+// 選んだ経路の路線だけを表示し、出発・到着・乗り換えの駅に名前を出す
+function showRoute(i) {
+  const r = route.results[i];
+  if (!r) return;
+  const g = route.graph;
+  const steps = routeSteps(g, r, route.from, route.to);
+  const lines = [];
+  for (const s of steps) {
+    if (s.type !== 'ride') continue;
+    const sel = lineSel(s.line);
+    if (!lines.some((l) => sameLine(l, sel))) lines.push(sel);
+  }
+  ensureVisible(lines.map((l) => l.cat));
+  popup?.remove();
+  setSelection(null);
+  closePanel();
+  view = { mode: 'route', lines };
+  applyView();
+  [...el.routeResults.children].forEach((li, j) => li.setAttribute('aria-current', String(j === i)));
+
+  const roles = new Map(); // 駅 → start / end / via
+  const put = (id, role) => {
+    if (!roles.has(id) || role !== 'via') roles.set(id, role);
+  };
+  steps.forEach((s, j) => {
+    put(s.from, j === 0 ? 'start' : 'via');
+    put(s.to, j === steps.length - 1 ? 'end' : 'via');
+  });
+  const prefix = { start: '出発 ', end: '到着 ', via: '' };
+  const bounds = new maplibregl.LngLatBounds();
+  // 出発・到着の吹き出しが、近くの乗り換え駅の吹き出しに隠れないよう、後から重ねる
+  const ordered = [...roles].sort(([, a], [, b]) => Number(a !== 'via') - Number(b !== 'via'));
+  for (const [id, role] of ordered) {
+    const c = g.clusters[id];
+    const div = document.createElement('div');
+    div.className = `route-pin ${role}`;
+    div.textContent = prefix[role] + c.key;
+    routeMarkers.push(new maplibregl.Marker({ element: div, anchor: 'bottom', offset: [0, -6] }).setLngLat([c.lon, c.lat]).addTo(map));
+    bounds.extend([c.lon, c.lat]);
+  }
+  map.getSource('route-walk').setData({
+    type: 'FeatureCollection',
+    features: steps
+      .filter((s) => s.type === 'walk')
+      .map((s) => ({
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'LineString',
+          coordinates: [
+            [g.clusters[s.from].lon, g.clusters[s.from].lat],
+            [g.clusters[s.to].lon, g.clusters[s.to].lat],
+          ],
+        },
+      })),
+  });
+  // 駅名の吹き出しが画面の端で切れないよう、左右に余白を取る
+  const { clientWidth: w, clientHeight: h } = map.getContainer();
+  const side = Math.min(90, w * 0.2);
+  const bottom = Math.min($('bottom').offsetHeight + 30, h * 0.6);
+  map.fitBounds(bounds, { padding: { top: 70, left: side, right: side, bottom }, maxZoom: 15, duration: 700 });
+}
+
+el.btnRoute.addEventListener('click', () => (el.routePanel.hidden ? openRoutePanel() : closeRoutePanel()));
+$('route-close').addEventListener('click', closeRoutePanel);
+$('route-swap').addEventListener('click', () => {
+  [el.routeFrom.value, el.routeTo.value] = [el.routeTo.value, el.routeFrom.value];
+  runRouteSearch();
+});
+el.routeBus.addEventListener('change', runRouteSearch);
+el.routeWalk.addEventListener('change', runRouteSearch);
+el.routeResults.addEventListener('click', (e) => {
+  const li = e.target.closest('li');
+  if (li) showRoute(Number(li.dataset.idx));
+});
+for (const [which, { input, list }] of Object.entries(routeFields)) {
+  input.addEventListener('focus', () => {
+    input.select();
+    showSuggest(which);
+  });
+  input.addEventListener('input', () => showSuggest(which));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') chooseStation(which, list.querySelector('li[data-name]')?.dataset.name);
+    if (e.key === 'Escape') {
+      list.hidden = true;
+      input.blur();
+      e.stopPropagation();
+    }
+  });
+  // 候補をタップしても入力欄のフォーカスが外れないようにする
+  list.addEventListener('pointerdown', (e) => e.preventDefault());
+  list.addEventListener('click', (e) => chooseStation(which, e.target.closest('li')?.dataset.name));
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.route-field')) hideSuggest();
 });
 
 // ---- その他の UI ------------------------------------------------------------
@@ -873,9 +1179,11 @@ map.on('load', async () => {
   for (const cat of CATEGORIES) addCategoryLayers(cat);
   addHighlightLayers();
   addStopLayers();
+  addRouteLayers();
   applyView(); // 前回非表示にしたカテゴリを反映する
   buildSearchItems();
   el.search.disabled = false;
+  el.btnRoute.disabled = false;
 
   // 日本全体 → 東京近郊へズームイン。東京は先に読み込んでおく
   loadArea(areas[0].id).catch(showLoadError);
