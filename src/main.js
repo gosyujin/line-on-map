@@ -126,6 +126,34 @@ let selected = null; // 強調表示中の路線 { cat, gid }
 // 表示モード: 全路線 / 1路線だけ / 駅に接続する路線だけ
 let view = { mode: 'all' };
 const catVisible = Object.fromEntries(CATEGORIES.map((c) => [c.key, true]));
+
+// 電車・地下鉄・バスの表示/非表示は localStorage に保存し、次回起動時に復元する
+const CAT_STORAGE_KEY = 'line-on-map:cat-visible';
+
+function loadCatVisible() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CAT_STORAGE_KEY));
+    if (!saved || typeof saved !== 'object') return;
+    for (const { key } of CATEGORIES) {
+      if (typeof saved[key] === 'boolean') catVisible[key] = saved[key];
+    }
+  } catch {
+    // 保存データが壊れている・localStorage が使えない場合は初期値(すべて表示)のまま
+  }
+}
+
+function saveCatVisible() {
+  try {
+    localStorage.setItem(CAT_STORAGE_KEY, JSON.stringify(catVisible));
+  } catch {
+    // 容量超過やプライベートモードでは保存できないが、動作には影響しない
+  }
+}
+
+loadCatVisible();
+for (const { key } of CATEGORIES) {
+  document.querySelector(`#controls input[data-cat="${key}"]`).checked = catVisible[key];
+}
 let panelState = null; // { type: 'line', sel } | { type: 'station' }
 
 const lineLayerIds = CATEGORIES.map((c) => `${c.key}-line`);
@@ -264,6 +292,7 @@ function ensureVisible(cats) {
     catVisible[cat] = true;
     document.querySelector(`#controls input[data-cat="${cat}"]`).checked = true;
   }
+  saveCatVisible();
 }
 
 async function showOnly(sel, { fit = true } = {}) {
@@ -698,6 +727,7 @@ document.querySelectorAll('#controls input[data-cat]').forEach((input) => {
   input.addEventListener('change', () => {
     const key = input.dataset.cat;
     catVisible[key] = input.checked;
+    saveCatVisible();
     if (!input.checked && selected?.cat === key) clearSelection();
     // 絞り込み中にカテゴリを切り替えたら、絞り込みを解除して通常表示に戻す
     view = { mode: 'all' };
@@ -837,6 +867,7 @@ map.on('load', async () => {
   for (const cat of CATEGORIES) addCategoryLayers(cat);
   addHighlightLayers();
   addStopLayers();
+  applyView(); // 前回非表示にしたカテゴリを反映する
   buildSearchItems();
   el.search.disabled = false;
 
