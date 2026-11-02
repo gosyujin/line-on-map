@@ -7,7 +7,7 @@
 // データ © OpenStreetMap contributors (ODbL)
 
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -403,6 +403,22 @@ function groupBus(cat, data, nodes) {
     .map((g) => ({ ...g, operators: [...g.operators], detail: [...g.detail].slice(0, 4).join(' / ') }));
 }
 
+// OSM に路線が無いバスは、scripts/extra-routes.json に手書きで補足する。
+// 停留所を順に結んだ簡易的な線として出力する(道路には沿わない)。OSM 側に追加されたら、ここから消す。
+function extraRoutes(key) {
+  const file = join(ROOT, 'scripts', 'extra-routes.json');
+  const extras = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8'))[key] ?? [] : [];
+  return extras.map((r, i) => ({
+    name: r.name,
+    nameEn: '',
+    operators: r.operators ?? [],
+    colour: r.colour ?? '',
+    detail: r.detail ?? '',
+    ways: new Map([[`extra-${key}-${i}`, r.stops.map((s) => [round(s.lon), round(s.lat)])]]),
+    stops: r.stops.map(({ name, lon, lat }) => ({ name, lon, lat })),
+  }));
+}
+
 // 色指定のない路線は、路線名から決まる色(再生成しても変わらない)を割り当てる
 function fallbackColour(name) {
   let h = 0;
@@ -419,7 +435,8 @@ function fallbackColour(name) {
 }
 
 function build(key, cat, data, nodes) {
-  const lines = (cat.groupBy === 'ref' ? groupBus(cat, data, nodes) : dropCovered(groupLines(cat, data, nodes))).sort(
+  const found = cat.groupBy === 'ref' ? [...groupBus(cat, data, nodes), ...extraRoutes(key)] : dropCovered(groupLines(cat, data, nodes));
+  const lines = found.sort(
     (a, b) => a.name.localeCompare(b.name, 'ja'),
   );
   // 路線の識別(gid・名前・色)は全エリアを通して決め、ジオメトリだけをエリア別に分ける。
