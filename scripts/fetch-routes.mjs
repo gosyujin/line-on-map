@@ -408,15 +408,20 @@ function groupBus(cat, data, nodes) {
 function extraRoutes(key) {
   const file = join(ROOT, 'scripts', 'extra-routes.json');
   const extras = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8'))[key] ?? [] : [];
-  return extras.map((r, i) => ({
-    name: r.name,
-    nameEn: '',
-    operators: r.operators ?? [],
-    colour: r.colour ?? '',
-    detail: r.detail ?? '',
-    ways: new Map([[`extra-${key}-${i}`, r.stops.map((s) => [round(s.lon), round(s.lat)])]]),
-    stops: r.stops.map(({ name, lon, lat }) => ({ name, lon, lat })),
-  }));
+  return extras.map((r, i) => {
+    // paths は停留所名を通る順に並べたもの(枝分かれする路線は複数)。省略すると stops の並び順で1本につなぐ
+    const at = new Map(r.stops.map((s) => [s.name, [round(s.lon), round(s.lat)]]));
+    const paths = r.paths ?? [r.stops.map((s) => s.name)];
+    return {
+      name: r.name,
+      nameEn: '',
+      operators: r.operators ?? [],
+      colour: r.colour ?? '',
+      detail: r.detail ?? '',
+      ways: new Map(paths.map((path, j) => [`extra-${key}-${i}-${j}`, path.map((n) => at.get(n))])),
+      stops: r.stops.map(({ name, lon, lat }) => ({ name, lon, lat })),
+    };
+  });
 }
 
 // 色指定のない路線は、路線名から決まる色(再生成しても変わらない)を割り当てる
