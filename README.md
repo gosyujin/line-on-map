@@ -3,7 +3,7 @@
 東京近郊の電車・地下鉄・バスを、実際に通っているルートで地図上に表示するWebアプリです。
 路線をクリック/タップすると、その路線がオレンジのグローで強調されます。
 
-公開URL: https://note.gosyujin.com/line-on-map/
+公開URL: https://gosyujin.com/line-on-map/
 
 ## 構成
 
