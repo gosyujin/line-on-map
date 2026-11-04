@@ -1,8 +1,9 @@
-// OpenStreetMap (Overpass API) から東京近郊の路線データを取得し、
+// OpenStreetMap (Overpass API) から東京近郊・北海道の路線データを取得し、
 // 路線単位にまとめた GeoJSON を public/data/ に出力する。
 //
 //   npm run fetch-data            # キャッシュがあれば再利用
 //   npm run fetch-data -- --force # 再取得
+//   npm run fetch-data -- --areas=hokkaido  # 指定エリアだけ作り、今ある public/data に足す(ほかのエリアのファイルは触らない。公開中のデータを作り直さずに、エリアを足すとき)
 //
 // データ © OpenStreetMap contributors (ODbL)
 
@@ -15,6 +16,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE_DIR = join(ROOT, '.cache');
 const OUT_DIR = join(ROOT, 'public', 'data');
 const FORCE = process.argv.includes('--force');
+// --areas=a,b: そのエリアだけ取得・出力し、今ある public/data/index.json に足す。ほかのエリアは作り直さない
+const ONLY = (process.argv.find((a) => a.startsWith('--areas='))?.slice('--areas='.length) ?? '').split(',').filter(Boolean);
 
 const UA = 'line-on-map/0.1 (https://github.com/gosyujin/line-on-map)';
 const ENDPOINTS = (process.env.OVERPASS_URL ? [process.env.OVERPASS_URL] : []).concat([
@@ -26,11 +29,20 @@ const ENDPOINTS = (process.env.OVERPASS_URL ? [process.env.OVERPASS_URL] : []).c
 // データはエリアごとのファイルに分けて出力し、画面では表示範囲に入ったエリアだけを読み込む。
 // 路線・駅は、先に並んだ(bbox に含まれる)エリアへ割り当てる。どれにも含まれなければ中心が最も近いエリア。
 // filter は種別ごとの追加条件(種別ごとに Overpass のクエリへ足す)。現在はどのエリアも絞り込まない。
+// ways はそのエリアで、路線リレーションではなく線路(way)の名前から路線を作る種別。北海道は路線リレーションが
+// 特急・快速の運行系統ばかりで、函館本線・千歳線などの「路線」が OSM に無いため。
+// skip はそのエリアで取得しない種別。データが大きすぎるバスは、北海道では取得しない
+// (画面側がエリア×全種別のファイルを読むので、取得しない種別も空のファイルは出力する)。
 const AREAS = [
   { id: 'tokyo', name: '東京', bbox: [35.45, 139.35, 35.85, 139.95], filter: {} },
   // 東端は成田空港(東経140.39°)まで含める
   { id: 'chiba', name: '千葉', bbox: [35.5, 139.9, 35.95, 140.5], filter: {} },
+  // 北海道全域(渡島半島の南端から、根室・知床まで)
+  { id: 'hokkaido', name: '北海道', bbox: [41.3, 139.3, 45.6, 145.9], filter: {}, ways: ['train'], skip: ['bus'] },
 ];
+const areasOf = (key) => AREAS.filter((a) => !a.skip?.includes(key) && (!ONLY.length || ONLY.includes(a.id)));
+const byWays = (key, area) => area.ways?.includes(key);
+if (ONLY.some((id) => !AREAS.some((a) => a.id === id))) throw new Error(`--areas: unknown area in ${ONLY}`);
 // 範囲外へ長く伸びる路線(東海道線など)を切り落とすための余白付きクリップ範囲
 const CLIP_MARGIN = 0.05;
 
@@ -88,19 +100,22 @@ const areaQuery = (key, cat, area) => `${cat.query}${area.filter[key] ?? ''}(${a
 // エリアごとに取得してキャッシュし、重複する範囲のリレーションは id でまとめる
 async function loadCategory(key, cat) {
   const elements = new Map();
-  for (const area of AREAS) {
-    const cacheFile = join(CACHE_DIR, `${key}-${area.id}.json`);
+  for (const area of areasOf(key)) {
+    const ways = byWays(key, area);
+    const cacheFile = join(CACHE_DIR, ways ? `${key}-ways-${area.id}.json` : `${key}-${area.id}.json`);
     let data;
     if (!FORCE && existsSync(cacheFile)) {
       console.log(`[${key}/${area.id}] using cache`);
       data = JSON.parse(await readFile(cacheFile, 'utf8'));
     } else {
-      console.log(`[${key}/${area.id}] fetching from Overpass...`);
-      data = await overpass(`${areaQuery(key, cat, area)};out geom;`);
+      console.log(`[${key}/${area.id}] fetching ${ways ? 'ways' : 'relations'} from Overpass...`);
+      // service (側線・留置線など) の付いた線路は除く
+      const q = ways ? `way["railway"~"^(rail|light_rail|monorail)$"][!"service"]${area.filter[key] ?? ''}(${area.bbox.join(',')})` : areaQuery(key, cat, area);
+      data = await overpass(`${q};out geom;`);
       await mkdir(CACHE_DIR, { recursive: true });
       await writeFile(cacheFile, JSON.stringify(data));
     }
-    for (const e of data.elements) elements.set(e.id, e);
+    for (const e of data.elements) elements.set(`${e.type}${e.id}`, e);   // id は種類ごとに別なので、種類も付けてまとめる
   }
   return { elements: [...elements.values()] };
 }
@@ -108,19 +123,21 @@ async function loadCategory(key, cat) {
 // 路線リレーションのメンバーノード(駅・停留所)の名前と座標を取得する
 async function loadNodes(key, cat) {
   const nodes = {};
-  for (const area of AREAS) {
-    const cacheFile = join(CACHE_DIR, `${key}-nodes-${area.id}.json`);
+  for (const area of areasOf(key)) {
+    const ways = byWays(key, area);
+    const cacheFile = join(CACHE_DIR, ways ? `${key}-stations-${area.id}.json` : `${key}-nodes-${area.id}.json`);
     if (!FORCE && existsSync(cacheFile)) {
       console.log(`[${key}/${area.id}] using nodes cache`);
       Object.assign(nodes, JSON.parse(await readFile(cacheFile, 'utf8')));
       continue;
     }
     console.log(`[${key}/${area.id}] fetching stops from Overpass...`);
-    const data = await overpass(`${areaQuery(key, cat, area)}->.r;node(r.r);out;`);
+    // 線路から作る種別は、路線のメンバーが無いので、エリア内の駅・停留所 (operator つき) を全部取る
+    const data = await overpass(ways ? `node["railway"~"^(station|halt)$"](${area.bbox.join(',')});out;` : `${areaQuery(key, cat, area)}->.r;node(r.r);out;`);
     const found = {};
     for (const e of data.elements) {
       const name = e.tags?.['name:ja'] || e.tags?.name;
-      if (e.type === 'node' && name) found[e.id] = { name, lat: e.lat, lon: e.lon };
+      if (e.type === 'node' && name) found[e.id] = { name, lat: e.lat, lon: e.lon, ...(e.tags.operator ? { operator: e.tags.operator } : {}) };
     }
     await writeFile(cacheFile, JSON.stringify(found));
     Object.assign(nodes, found);
@@ -189,11 +206,13 @@ function canonicalName(name, tags) {
     name = m[2].startsWith(short) ? m[2] : short + m[2];
   }
   if (isJR(tags.operator || '') && !/^JR/.test(name)) name = `JR${name}`;
+  // 札幌市営地下鉄は OSM の名前が「南北線」だけで、他の市の路線と区別できない
+  if (/札幌市/.test(tags.operator || '') && !/^札幌/.test(name)) name = `札幌市営地下鉄${name}`;
   return KEY_ALIAS[name] ?? name;
 }
 
 function isJR(operator) {
-  return /JR|東日本旅客鉄道|東海旅客鉄道/.test(operator);
+  return /JR|東日本旅客鉄道|東海旅客鉄道|北海道旅客鉄道/.test(operator);
 }
 
 // ---- 幾何処理 -------------------------------------------------------------
@@ -343,6 +362,100 @@ function groupLines(cat, data, nodes) {
     });
 }
 
+// ---- 線路 (way) の名前から路線を作る (北海道) -----------------------------------
+// 名前が揺れている (JR函館線 / JR函館本線 / 函館本線) ので、正式な路線名にそろえる。
+const WAY_ALIAS = {
+  JR函館線: 'JR函館本線', 函館線: 'JR函館本線', 函館本線: 'JR函館本線',
+  JR室蘭線: 'JR室蘭本線', 室蘭線: 'JR室蘭本線', 室蘭本線: 'JR室蘭本線',
+  JR根室線: 'JR根室本線', 根室線: 'JR根室本線', 根室本線: 'JR根室本線',
+  JR宗谷線: 'JR宗谷本線', 宗谷線: 'JR宗谷本線', 宗谷本線: 'JR宗谷本線',
+  JR石北線: 'JR石北本線', 石北線: 'JR石北本線', 石北本線: 'JR石北本線',
+  JR釧網線: 'JR釧網本線', 釧網本線: 'JR釧網本線', 釧網線: 'JR釧網本線',
+  JR日高線: 'JR日高本線', 日高本線: 'JR日高本線', 日高線: 'JR日高本線',
+  札沼線: 'JR札沼線', 石勝線: 'JR石勝線', 富良野線: 'JR富良野線', 千歳線: 'JR千歳線',   // 事業者タグの無い線路にも JR を付ける
+  // 青函トンネルの区間 (海峡線) は北海道新幹線と線路を共用している
+  北海道新幹線: 'JR北海道新幹線', 海峡線: 'JR北海道新幹線', JR海峡線: 'JR北海道新幹線',
+};
+// 路線ではないもの (保存鉄道・観光用・廃線)
+const WAY_EXCLUDE = /馬車|トロッコ|廃線|豆汽車|リリー|空知鉄道|標津線/;   // 標津線は廃線 (OSM に線路だけ残っている)
+// "JR函館線;桂川トンネル" "JR函館本線嵐山トンネル" "海峡線・北海道新幹線" → 路線名の部分 (最初の「…線」「…鉄道」まで)
+function wayLineName(tags) {
+  const raw = (tags['name:ja'] || tags.name || '').normalize('NFKC');
+  if (!raw || WAY_EXCLUDE.test(raw)) return null;
+  const part = raw.split(/[;；]/).map((t) => t.match(/^.*?(?:鉄道線|本線|新幹線|線|鉄道)/)?.[0]).find(Boolean);
+  return part ? (WAY_ALIAS[part] ?? part) : null;
+}
+
+// 駅は、事業者が合い(両方に事業者があれば)、路線の線路から STATION_R 度 (約 160m) 以内にあるものをその路線の駅にする
+const STATION_R = 0.0015;
+const COS_LAT = 0.73; // 北緯43° 付近。経度の差を縮めて距離の目安にする
+function assignStations(groups, nodes) {
+  const CELL = 0.01;
+  const grid = new Map();
+  for (const g of groups) {
+    for (const way of g.ways.values()) {
+      for (let i = 1; i < way.length; i++) {
+        const [ax, ay] = way[i - 1];
+        const [bx, by] = way[i];
+        const x0 = Math.floor((Math.min(ax, bx) - STATION_R) / CELL);
+        const x1 = Math.floor((Math.max(ax, bx) + STATION_R) / CELL);
+        const y0 = Math.floor((Math.min(ay, by) - STATION_R) / CELL);
+        const y1 = Math.floor((Math.max(ay, by) + STATION_R) / CELL);
+        for (let x = x0; x <= x1; x++) {
+          for (let y = y0; y <= y1; y++) {
+            const k = `${x},${y}`;
+            if (!grid.has(k)) grid.set(k, []);
+            grid.get(k).push({ g, ax, ay, bx, by });
+          }
+        }
+      }
+    }
+  }
+  const near = (n, { ax, ay, bx, by }) => {
+    const dx = (bx - ax) * COS_LAT;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const px = (n.lon - ax) * COS_LAT;
+    const py = n.lat - ay;
+    const t = len2 ? Math.max(0, Math.min(1, (px * dx + py * dy) / len2)) : 0;
+    return Math.hypot(px - t * dx, py - t * dy) <= STATION_R;
+  };
+  // 事業者名の表記ゆれ (JR北海道 / ＪＲ北海道 / 北海道旅客鉄道) をそろえて比べる
+  const op = (o) => o.normalize('NFKC').replace(/JR北海道.*/, '北海道旅客鉄道').trim();
+  const sameOperator = (g, n) => !n.operator || !g.operators.size || [...g.operators].some((o) => n.operator.split(';').some((t) => op(o).includes(op(t)) || op(t).includes(op(o))));
+  for (const n of Object.values(nodes)) {
+    const hit = new Set();
+    for (const seg of grid.get(`${Math.floor(n.lon / CELL)},${Math.floor(n.lat / CELL)}`) ?? []) {
+      if (!hit.has(seg.g) && sameOperator(seg.g, n) && near(n, seg)) hit.add(seg.g);
+    }
+    for (const g of hit) g.stops.push(n);
+  }
+}
+
+function groupWays(data, nodes) {
+  const groups = new Map();
+  for (const e of data.elements) {
+    if (e.type !== 'way' || !e.geometry) continue;
+    const tags = e.tags ?? {};
+    const base = wayLineName(tags);
+    if (!base) continue;
+    const name = canonicalName(base, tags);
+    let g = groups.get(name);
+    if (!g) {
+      g = { name, nameEn: '', operators: new Set(), colour: '', ways: new Map(), stops: [] };
+      groups.set(name, g);
+    }
+    for (const o of (tags.operator || tags.network || '').split(';')) o && g.operators.add(o);
+    if (!g.nameEn && tags['name:en']) g.nameEn = tags['name:en'].split(/\s*[(:]/)[0];
+    if (!g.colour && tags.colour) g.colour = tags.colour;
+    if (!e.geometry.some((p) => inClip(p.lon, p.lat))) continue;
+    g.ways.set(e.id, e.geometry.map((p) => [round(p.lon), round(p.lat)]));
+  }
+  const out = [...groups.values()].filter((g) => g.ways.size > 0);
+  assignStations(out, nodes);
+  return out.map((g) => ({ ...g, operators: [...g.operators] }));
+}
+
 const TOEI = /東京都交通局|都営|Toei/;
 
 // バスの事業者名: 「京成バス株式会社」→「京成バス」。都営バスは「都営バス」にそろえる。
@@ -439,8 +552,11 @@ function fallbackColour(name) {
   return `#${f(0)}${f(8)}${f(4)}`;
 }
 
-function build(key, cat, data, nodes) {
-  const found = cat.groupBy === 'ref' ? [...groupBus(cat, data, nodes), ...extraRoutes(key)] : dropCovered(groupLines(cat, data, nodes));
+function build(key, cat, data, nodes, gidStart = 0) {
+  const found =
+    cat.groupBy === 'ref'
+      ? [...groupBus(cat, data, nodes), ...extraRoutes(key)]
+      : [...dropCovered(groupLines(cat, data, nodes)), ...groupWays(data, nodes)];
   const lines = found.sort(
     (a, b) => a.name.localeCompare(b.name, 'ja'),
   );
@@ -449,8 +565,10 @@ function build(key, cat, data, nodes) {
   const byArea = Object.fromEntries(
     AREAS.map((a) => [a.id, { lines: [], stops: [] }]),
   );
+  // gid は種別ごとの通し番号。--areas で足すときは、今ある路線の gid を変えないよう、その後ろから振る
   const index = [];
-  lines.forEach((g, gid) => {
+  lines.forEach((g, i) => {
+    const gid = gidStart + i;
     const colour = /^#[0-9a-f]{6}$/i.test(g.colour)
       ? g.colour
       : cat.groupBy === 'ref'
@@ -501,16 +619,28 @@ function build(key, cat, data, nodes) {
   return { index, byArea };
 }
 
-await rm(OUT_DIR, { recursive: true, force: true });
-const index = [];
+// --areas: 今ある index.json から、そのエリアだけの路線を除いて残す (ほかのエリアのファイルは触らない)
+const prev = ONLY.length ? JSON.parse(readFileSync(join(OUT_DIR, 'index.json'), 'utf8')) : { areas: [], lines: [] };
+const kept = prev.lines.filter((l) => !l.areas.every((a) => ONLY.includes(a)));
+if (!ONLY.length) await rm(OUT_DIR, { recursive: true, force: true });
+const index = [...kept];
 const extents = Object.fromEntries(AREAS.map((a) => [a.id, [Infinity, Infinity, -Infinity, -Infinity]]));
 for (const [key, cat] of Object.entries(CATEGORIES)) {
+  if (ONLY.length && !areasOf(key).length) {
+    // 指定エリアでは取得しない種別 (北海道のバス)。画面はエリア×全種別のファイルを読むので、空のファイルだけ出す
+    for (const id of ONLY) {
+      await mkdir(join(OUT_DIR, id), { recursive: true });
+      for (const f of [key, `${key}-stops`]) await writeFile(join(OUT_DIR, id, `${f}.geojson`), JSON.stringify({ type: 'FeatureCollection', features: [] }));
+    }
+    continue;
+  }
   const raw = await loadCategory(key, cat);
   const nodes = await loadNodes(key, cat);
-  const built = build(key, cat, raw, nodes);
+  const gidStart = kept.filter((l) => l.cat === key).reduce((m, l) => Math.max(m, l.gid + 1), 0);
+  const built = build(key, cat, raw, nodes, gidStart);
   index.push(...built.index);
   let summary = '';
-  for (const area of AREAS) {
+  for (const area of AREAS.filter((a) => !ONLY.length || ONLY.includes(a.id))) {
     const { lines, stops } = built.byArea[area.id];
     await mkdir(join(OUT_DIR, area.id), { recursive: true });
     const json = JSON.stringify({ type: 'FeatureCollection', features: lines });
@@ -533,6 +663,10 @@ for (const [key, cat] of Object.entries(CATEGORIES)) {
   }
   console.log(`[${key}] ${built.index.length} lines total |${summary}`);
 }
-const areas = AREAS.map(({ id, name }) => ({ id, name, bbox: extents[id] }));
+// 今回作ったエリアは実データの範囲を入れ直し、作っていないエリアは今ある index.json の値のまま
+const areas = AREAS.filter((a) => !ONLY.length || ONLY.includes(a.id) || prev.areas.some((p) => p.id === a.id)).map(({ id, name }) => {
+  const old = prev.areas.find((p) => p.id === id);
+  return { id, name, bbox: ONLY.length && !ONLY.includes(id) ? old.bbox : extents[id] };
+});
 await writeFile(join(OUT_DIR, 'index.json'), JSON.stringify({ areas, lines: index }));
 console.log(`index.json: ${index.length} lines`);
