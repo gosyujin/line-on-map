@@ -55,7 +55,8 @@ const geolocate = new maplibregl.GeolocateControl({
   trackUserLocation: true,
   showUserLocation: true,
   showAccuracyCircle: true,
-  fitBoundsOptions: { maxZoom: 15 },
+  // スケールバーが 1km 表示になるズーム (東京付近で約 12.5)。精度円が小さくてもこれ以上は寄らない
+  fitBoundsOptions: { maxZoom: 12.5 },
 });
 map.addControl(geolocate, 'top-right');
 geolocate.on('error', (e) => {
